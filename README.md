@@ -281,6 +281,7 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 | **🔧 Service Account** | | |
 | `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` | | Path to service account JSON key file (domain-wide delegation) |
 | `GOOGLE_SERVICE_ACCOUNT_KEY_JSON` | | Inline service account JSON key (alternative to file) |
+| `DWD_ALLOWED_DOMAINS` | | Comma-separated domain allowlist for per-request impersonation (optional) |
 | **🔍 Custom Search** | | |
 | `GOOGLE_PSE_API_KEY` | | API key for Programmable Search Engine |
 | `GOOGLE_PSE_ENGINE_ID` | | Search Engine ID for PSE |
@@ -789,7 +790,7 @@ registration advertises the updated Chat scope set.
 | <sub>`create_drive_folder`</sub> | <sub>Core</sub> | <sub>Create empty folders in Drive or shared drives</sub> |
 | <sub>`import_to_google_doc`</sub> | <sub>Core</sub> | <sub>Import files (MD, DOCX, HTML, etc.) as Google Docs</sub> |
 | <sub>`get_drive_shareable_link`</sub> | <sub>Core</sub> | <sub>Get shareable links for a file</sub> |
-| <sub>`list_drive_items`</sub> | <sub>Extended</sub> | <sub>List folder contents</sub> |
+| <sub>`list_drive_items`</sub> | <sub>Extended</sub> | <sub>List folder contents or shared drives</sub> |
 | <sub>`copy_drive_file`</sub> | <sub>Extended</sub> | <sub>Copy existing files (templates) with optional renaming</sub> |
 | <sub>`update_drive_file`</sub> | <sub>Extended</sub> | <sub>Update file metadata, move between folders</sub> |
 | <sub>`manage_drive_access`</sub> | <sub>Extended</sub> | <sub>Grant, update, revoke permissions, and transfer ownership</sub> |
@@ -1307,8 +1308,21 @@ uv run main.py
 **Key Behaviors:**
 - The OAuth callback server is not started (no interactive auth needed)
 - Credentials directory permission checks are skipped
-- **All operations impersonate the configured `USER_GOOGLE_EMAIL`** — any email addresses supplied in tool calls (e.g., `user_email` parameters) are ignored. This differs from OAuth modes where each user authenticates separately.
+- When a tool call supplies `user_google_email`, service account mode uses that email as the domain-wide delegation impersonation subject.
+- `USER_GOOGLE_EMAIL` is still required and serves as the fallback when no caller email is provided.
 - The service account key is validated at startup (checks for required fields and correct type)
+
+**Per-Request Impersonation:**
+
+The caller-supplied `user_google_email` on each tool call is used as the DWD impersonation subject instead of the static `USER_GOOGLE_EMAIL`. This lets a single server instance act on behalf of multiple domain users.
+
+```bash
+# Optional: restrict which domains may be impersonated
+export DWD_ALLOWED_DOMAINS="corp.com,subsidiary.io"
+```
+
+- If `DWD_ALLOWED_DOMAINS` is set, only emails whose domain appears in the comma-separated list are accepted; all others raise an authentication error.
+- If `DWD_ALLOWED_DOMAINS` is unset, any email accepted by the service account's delegation scope is allowed.
 
 ### VS Code MCP Client Support
 
