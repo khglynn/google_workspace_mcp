@@ -5,6 +5,7 @@ import json
 import jwt
 import logging
 import os
+import webbrowser
 
 from typing import List, Optional, Tuple, Dict, Any
 from urllib.parse import parse_qs, urlparse
@@ -18,7 +19,7 @@ from googleapiclient.errors import HttpError
 from auth.scopes import SCOPES, get_current_scopes, has_required_scopes  # noqa
 from auth.oauth21_session_store import get_oauth21_session_store
 from auth.credential_store import get_credential_store
-from auth.oauth_config import get_oauth_config, is_stateless_mode
+from auth.oauth_config import get_oauth_config, is_oauth21_enabled, is_stateless_mode
 from core.config import (
     get_transport_mode,
     get_oauth_redirect_uri,
@@ -525,7 +526,30 @@ async def start_auth_flow(
             required_scopes=current_scopes,
             session_id=session_id,
         )
-        auth_url, _ = flow.authorization_url(access_type="offline", prompt=prompt_type)
+        # Add login_hint if email provided so Google pre-selects the right account
+        auth_kwargs = {"access_type": "offline", "prompt": prompt_type}
+        if initial_email_provided:
+            auth_kwargs["login_hint"] = user_google_email
+        auth_url, _ = flow.authorization_url(**auth_kwargs)
+
+        browser_opened = False
+        should_open_browser = (
+            get_transport_mode() == "stdio" and not is_oauth21_enabled()
+        )
+        if should_open_browser:
+            # Only legacy stdio runs on the user's workstation. HTTP/OAuth 2.1
+            # deployments may be remote, so opening a server-side browser is wrong.
+            try:
+                browser_opened = await asyncio.to_thread(webbrowser.open, auth_url)
+                if browser_opened:
+                    logger.info("Opened auth URL in browser automatically")
+                else:
+                    logger.info(
+                        "webbrowser.open() reported failure (likely headless environment); "
+                        "falling back to displaying URL"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not open browser automatically: {e}")
 
         store = get_oauth21_session_store()
         store.store_oauth_state(
@@ -535,18 +559,23 @@ async def start_auth_flow(
         )
 
         logger.info(
-            f"Auth flow started for {user_display_name}. Advise user to visit: {auth_url}"
+            f"Auth flow started for {user_display_name}. State: {oauth_state[:8]}... "
+            f"Browser opened automatically: {browser_opened}"
         )
 
-        message_lines = [
-            f"**ACTION REQUIRED: Google Authentication Needed for {user_display_name}**\n",
-            f"To proceed, the user must authorize this application for {service_name} access using all required permissions.",
-            "**LLM, please present this exact authorization URL to the user as a clickable hyperlink:**",
-            f"Authorization URL: {auth_url}",
-            f"Markdown for hyperlink: [Click here to authorize {service_name} access]({auth_url})\n",
-            "**LLM, after presenting the link, instruct the user as follows:**",
-            "1. Click the link and complete the authorization in their browser.",
-        ]
+        if browser_opened:
+            message_lines = [
+                f"**ACTION REQUIRED: Google Authentication Needed for {user_display_name}**\n",
+                "1. The authorization page has been **automatically opened in your browser**. Please complete the authorization there.",
+                "   If it did not appear, open this URL manually:",
+                f"   Authorization URL: {auth_url}",
+            ]
+        else:
+            message_lines = [
+                f"**ACTION REQUIRED: Google Authentication Needed for {user_display_name}**\n",
+                f"1. Open this URL in your browser to authorize {service_name} access using all required permissions:",
+                f"   Authorization URL: {auth_url}",
+            ]
         session_info_for_llm = ""
 
         if not initial_email_provided:

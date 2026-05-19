@@ -304,6 +304,12 @@ def _correct_time_format_for_api(
     if not time_str:
         return None
 
+    # Defensive normalization: some LLM-driven MCP clients double-encode JSON
+    # string arguments, passing values like '"2026-05-15T00:00:00Z"'
+    time_str = time_str.strip().strip('"').strip("'").strip()
+    if not time_str or time_str.lower() in ("null", "none"):
+        return None
+
     logger.info(
         f"_correct_time_format_for_api: Processing {param_name} with value '{time_str}', timezone: '{timezone}'"
     )
