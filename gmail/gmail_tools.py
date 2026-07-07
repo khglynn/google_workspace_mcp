@@ -90,8 +90,10 @@ class _HTMLTextExtractor(HTMLParser):
         self._skip = False
 
     def handle_starttag(self, tag, attrs):
-        self._skip = tag in ("script", "style")
-        if tag == "br":
+        if tag in ("script", "style"):
+            self._skip = True
+            return
+        if tag == "br" and not self._skip:
             self._text.append(" ")
 
     def handle_endtag(self, tag):
