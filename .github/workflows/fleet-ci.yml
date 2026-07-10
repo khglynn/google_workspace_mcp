@@ -19,16 +19,33 @@ jobs:
       - name: Frozen install (Shai-Hulud defense — exact locked versions only)
         run: uv sync --frozen
       - name: Tests
-        run: uv run pytest -q
+        # --deselect: upstream shipped v1.22.0 with this one test broken
+        # (updateMask changed by their #862 forms fix, test not updated;
+        # verified failing on pristine v1.22.0 baseline 2026-07-09).
+        # Config-level workaround, no code divergence. Drop the deselect when
+        # an upstream release fixes it; report upstream meanwhile.
+        run: >-
+          uv run pytest -q
+          --deselect tests/gforms/test_forms_tools.py::test_set_publish_settings_builds_publish_state_body
 
+  # osv-scanner ships as a REUSABLE WORKFLOW, not a root action (maiden run
+  # taught us: "Top level 'runs:' section is required"). BLOCKING.
   dependency-audit:
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    permissions:
+      actions: read
+      security-events: write
+      contents: read
+    with:
+      scan-args: |-
+        --lockfile=uv.lock
+      fail-on-vuln: true
+      upload-sarif: false
+
+  uv-audit-informational:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: OSV scan of uv.lock (BLOCKING)
-        uses: google/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-        with:
-          scan-args: --lockfile=uv.lock
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
       - name: uv audit (INFORMATIONAL while preview)
         continue-on-error: true
@@ -54,7 +71,9 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
       - name: zizmor (workflow injection / unpinned-uses lint)
-        run: uvx zizmor .github/workflows/
+        # scope to OUR workflows — upstream's tag-pinned files are their call
+        # and flagging them every PR is the noise that kills gate trust
+        run: uvx zizmor .github/workflows/fleet-*.yml
 
   aging-window:
     # Sync PRs must age 7 days before merge (supply-chain hedge). Fast lane:

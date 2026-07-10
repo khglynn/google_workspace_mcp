@@ -10,10 +10,16 @@ RUN apt-get update && apt-get install -y \
 # Install uv for faster dependency management
 RUN pip install --no-cache-dir uv
 
+# Fleet ops (khglynn): upgrade base-image Python packaging residue flagged by
+# Trivy — CVE-2026-24049 (wheel <0.46.2) + CVE-2026-23949 (jaraco.context <6.1.0)
+RUN pip install --no-cache-dir --upgrade "wheel>=0.46.2" "setuptools>=81" "jaraco.context>=6.1.0"
+
 COPY . .
 
 # Install Python dependencies using uv sync
-RUN uv sync --frozen --no-dev --extra disk
+# Fleet ops (khglynn): +valkey extra — without it the Redis-backed OAuth proxy
+# storage silently falls back to ephemeral disk (plan-adversary C1)
+RUN uv sync --frozen --no-dev --extra disk --extra valkey
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash app \
