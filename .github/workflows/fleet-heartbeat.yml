@@ -21,11 +21,31 @@ jobs:
         id: state
         env:
           GH_TOKEN: ${{ github.token }}
+          FLEET_PAT: ${{ secrets.FLEET_PAT }}
         run: |
-          latest=$(gh api repos/taylorwilsdon/google_workspace_mcp/releases/latest -q .tag_name)
+          latest=$(gh api repos/taylorwilsdon/google_workspace_mcp/releases/latest -q .tag_name | tr -cd 'A-Za-z0-9._-')
           current="v$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
           open_syncs=$(gh pr list --repo "$GITHUB_REPOSITORY" --label fleet-sync --state open --json number -q length)
-          msg="heartbeat: $(date -u +%Y-%m-%d) — pinned $current, upstream $latest, open sync PRs: $open_syncs"
+
+          # FLEET_PAT expiry watch: an expired PAT means sync PRs stop
+          # triggering CI *silently* — the heartbeat is the only thing that
+          # can see it coming. Warn at <30 days, shout if already dead.
+          pat_note=""
+          if [ -n "$FLEET_PAT" ]; then
+            exp=$(curl -sS -o /dev/null -D - -H "Authorization: Bearer $FLEET_PAT" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY" \
+                  | tr -d '\r' | awk -F': ' 'tolower($1)=="github-authentication-token-expiration"{print $2}')
+            if [ -z "$exp" ]; then
+              pat_note=" ⚠️ FLEET_PAT INVALID/EXPIRED — sync PRs will not run CI"
+            else
+              days=$(( ( $(date -u -d "$(echo "$exp" | sed 's/ UTC//')" +%s) - $(date -u +%s) ) / 86400 ))
+              [ "$days" -lt 30 ] && pat_note=" ⚠️ FLEET_PAT expires in ${days}d ($exp) — rotate it"
+            fi
+          else
+            pat_note=" ⚠️ FLEET_PAT not configured"
+          fi
+
+          msg="heartbeat: $(date -u +%Y-%m-%d) — pinned $current, upstream $latest, open sync PRs: $open_syncs$pat_note"
           echo "msg=$msg" >> "$GITHUB_OUTPUT"
           mkdir -p .fleet
           echo "$msg" >> .fleet/heartbeat.log
