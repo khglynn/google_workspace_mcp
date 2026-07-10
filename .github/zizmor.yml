@@ -1,0 +1,11 @@
+# zizmor config — fleet ops layer.
+# artipacked = checkout persisting git credentials. fleet-ci sets
+# persist-credentials: false everywhere (nothing there pushes). The two
+# workflows below NEED push credentials by design (heartbeat commits the
+# proof-of-life line; release-watch pushes sync branches) — acknowledged,
+# not accidental.
+rules:
+  artipacked:
+    ignore:
+      - fleet-heartbeat.yml
+      - fleet-release-watch.yml
