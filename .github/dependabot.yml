@@ -1,11 +1,22 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
+# Fleet ops layer (khglynn) — replaces upstream's unfilled template stub.
+# Dependency hygiene per the dependency-security guide: grouped minor/patch,
+# weekly cadence; the actions ecosystem keeps our SHA-pinned actions fresh.
+# Majors are never auto-merged — human eyes always.
 version: 2
 updates:
-  - package-ecosystem: "" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "uv"
+    directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: ["fleet-deps"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["fleet-deps"]

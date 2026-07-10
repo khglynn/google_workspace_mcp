@@ -1,0 +1,66 @@
+# Fleet ops: watch upstream RELEASES (not commits) and open an intake PR.
+# Design (2026-07-08 fleet plan): tag-based intake → sync branch → PR carrying
+# release notes + diff stat + a 7-day aging window (supply-chain hedge; the
+# `security-override` label is the KEV/EPSS fast lane, enforced by fleet-ci).
+name: fleet-release-watch
+on:
+  schedule:
+    - cron: "17 14 * * *" # daily, 09:17 CT
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Compare upstream latest release to our main
+        id: cmp
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # tag name is third-party input — sanitize to a safe charset at the source
+          latest=$(gh api repos/taylorwilsdon/google_workspace_mcp/releases/latest -q .tag_name | tr -cd 'A-Za-z0-9._-')
+          current="v$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
+          echo "latest=$latest current=$current"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ "$latest" = "$current" ]; then echo "behind=false" >> "$GITHUB_OUTPUT"; else echo "behind=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Open sync PR if behind (idempotent)
+        if: steps.cmp.outputs.behind == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_PAT || github.token }}
+          LATEST: ${{ steps.cmp.outputs.latest }}
+        run: |
+          if gh pr list --repo "$GITHUB_REPOSITORY" --head "sync/$LATEST" --state open --json number -q length | grep -qv '^0$'; then
+            echo "sync PR for $LATEST already open"; exit 0
+          fi
+          git config user.name "fleet-release-watch"
+          git config user.email "noreply@github.com"
+          git remote add upstream https://github.com/taylorwilsdon/google_workspace_mcp.git
+          git fetch upstream --tags --quiet
+          git checkout -b "sync/$LATEST"
+          git merge --no-edit "$LATEST"
+          git push origin "sync/$LATEST"
+          notes=$(gh api "repos/taylorwilsdon/google_workspace_mcp/releases/tags/$LATEST" -q .body | head -c 4000)
+          stat=$(git diff --stat "origin/main..HEAD" | tail -5)
+          agents=$(git diff --name-only "origin/main..HEAD" | grep -E '^(skills/|.*SKILL\.md|.*\.claude)' || echo "(none)")
+          not_before=$(date -u -d "+7 days" +%Y-%m-%d)
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "sync/$LATEST" \
+            --title "sync: upstream $LATEST" \
+            --label fleet-sync \
+            --body "$(printf 'Upstream release intake: **%s**\n\n**Aging window:** do not merge before **%s** (7-day supply-chain hedge; label `security-override` + cite the CVE for the fast lane).\n\n**Agent-facing files changed (review as a security surface):**\n```\n%s\n```\n\n**Diff stat (tail):**\n```\n%s\n```\n\n**Upstream release notes:**\n\n%s' "$LATEST" "$not_before" "$agents" "$stat" "$notes")"
+      - name: Notify Slack
+        if: steps.cmp.outputs.behind == 'true'
+        continue-on-error: true
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          LATEST: ${{ steps.cmp.outputs.latest }}
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "no webhook configured; skipping"; exit 0; }
+          curl -sS -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\":\"📦 workspace-mcp: upstream $LATEST intake PR opened (7-day aging) → https://github.com/$GITHUB_REPOSITORY/pulls\"}" "$WEBHOOK"

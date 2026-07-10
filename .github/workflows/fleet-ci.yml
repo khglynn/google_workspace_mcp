@@ -1,0 +1,77 @@
+# Fleet ops: the trustworthy gate (dependency-security guide: prod-reachable +
+# High threshold + no continue-on-error on blocking jobs; a noisy gate trains
+# everyone to ignore it, so informational checks are separated and non-blocking).
+name: fleet-ci
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - name: Frozen install (Shai-Hulud defense — exact locked versions only)
+        run: uv sync --frozen
+      - name: Tests
+        run: uv run pytest -q
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: OSV scan of uv.lock (BLOCKING)
+        uses: google/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: --lockfile=uv.lock
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - name: uv audit (INFORMATIONAL while preview)
+        continue-on-error: true
+        run: uv audit || true
+
+  container-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build image
+        run: docker build -t workspace-mcp:pr .
+      - name: Trivy (HIGH/CRITICAL, fixed-only, BLOCKING)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: workspace-mcp:pr
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - name: zizmor (workflow injection / unpinned-uses lint)
+        run: uvx zizmor .github/workflows/
+
+  aging-window:
+    # Sync PRs must age 7 days before merge (supply-chain hedge). Fast lane:
+    # `security-override` label. Non-sync PRs pass immediately.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Enforce 7-day aging on fleet-sync PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # event data via env, never inline in the script (injection hygiene)
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          CREATED: ${{ github.event.pull_request.created_at }}
+        run: |
+          echo "$LABELS" | grep -q 'fleet-sync' || { echo "not a sync PR — pass"; exit 0; }
+          echo "$LABELS" | grep -q 'security-override' && { echo "security-override — fast lane"; exit 0; }
+          created="$CREATED"
+          age_days=$(( ( $(date -u +%s) - $(date -u -d "$created" +%s) ) / 86400 ))
+          echo "PR age: ${age_days}d (need 7)"
+          [ "$age_days" -ge 7 ] || { echo "❌ aging window not met — re-run after $(date -u -d "$created +7 days" +%Y-%m-%d)"; exit 1; }
