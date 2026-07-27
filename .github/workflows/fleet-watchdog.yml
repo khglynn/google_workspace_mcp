@@ -1,0 +1,113 @@
+# Fleet ops: the schedule for the fleet-watchdog Cloudflare Worker.
+#
+# The Worker (fleet-watchdog.kevinhg.workers.dev, source in the meta-repo at
+# self-hosted-mcps/watchdog/) does all the actual work — it probes the four
+# Cloud Run services, keeps them warm, issues the Valkey read that stops Aiven's
+# free tier powering itself off, and de-duplicates alerts against KV so an
+# outage produces one message plus a 6-hourly reminder. This workflow only
+# decides WHEN that happens, and posts whatever the Worker says needs saying.
+#
+# Why the schedule lives here instead of in Cloudflare (2026-07-27): the
+# personal Cloudflare account is at the free plan's ceiling of 5 cron triggers
+# and all five belong to list-maker-cron (a sixth fails with API error 10072).
+# This repo is public, so Actions minutes are free and unlimited, and
+# fleet-heartbeat's weekly commit already keeps scheduled workflows from being
+# auto-disabled after 60 days of inactivity. If Workers Paid ever raises that
+# limit, move the cron back into wrangler.jsonc and delete this file — the
+# Worker's scheduled() handler already runs the identical code path.
+#
+# Deliberately NOT in GCP: a checker that lives inside the thing it checks
+# cannot report that thing being down.
+name: fleet-watchdog
+
+on:
+  schedule:
+    # Every 10 minutes. Cloud Run instances go idle in roughly 15, so this keeps
+    # one resident per account and first contact never eats the ~13s cold start
+    # that broke the kkevin OAuth reconnect on 2026-07-27. GitHub's scheduler
+    # runs late under load, which is fine: warming and keepalive degrade
+    # gracefully, and alerting does not care about a few minutes.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  # Never stack runs — a delayed scheduler can fire several at once, and
+  # overlapping probes would fight over the same KV state.
+  group: fleet-watchdog
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe the fleet via the watchdog Worker
+        id: probe
+        env:
+          WATCHDOG_TOKEN: ${{ secrets.WATCHDOG_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${WATCHDOG_TOKEN:-}" ]; then
+            echo "::error::WATCHDOG_TOKEN not configured — the Worker would run ungated (no alerting)."
+            exit 1
+          fi
+
+          # Token goes in a HEADER, not the URL — a query string can end up in a
+          # proxy log or inside a curl error message that then gets echoed.
+          # --fail is deliberately NOT used: the gated endpoint always answers
+          # 200 and reports fleet state in the BODY, so that "the fleet is
+          # degraded" and "the watchdog itself is broken" stay distinguishable.
+          body=$(curl -sS --max-time 120 \
+            -H "X-Watchdog-Token: ${WATCHDOG_TOKEN}" \
+            "https://fleet-watchdog.kevinhg.workers.dev/" 2>&1) || {
+            echo "::error::watchdog Worker unreachable"
+            echo "unreachable=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if ! echo "$body" | jq -e . >/dev/null 2>&1; then
+            echo "::error::watchdog returned non-JSON: $(echo "$body" | head -c 200)"
+            echo "unreachable=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "fleet=$(echo "$body" | jq -r .fleet)" >> "$GITHUB_OUTPUT"
+          # Alerts are only non-empty on a state CHANGE or a 6-hourly re-nag.
+          {
+            echo "alerts<<WATCHDOG_EOF"
+            echo "$body" | jq -r '.alerts[]?'
+            echo "WATCHDOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "$body" | jq -r '.services[] | "\(.name): \(if .healthy then "ok" else "DOWN — " + (.problems | join("; ")) end)"'
+
+      - name: Post alerts to Slack
+        # always() so a broken watchdog is itself reported — the failure mode
+        # this whole workflow exists to prevent is silence.
+        if: always()
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALERTS: ${{ steps.probe.outputs.alerts }}
+          UNREACHABLE: ${{ steps.probe.outputs.unreachable }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          [ -z "${WEBHOOK:-}" ] && { echo "no webhook configured; skipping"; exit 0; }
+
+          post() {
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              --data "$(jq -n --arg t "$1" '{text:$t}')" "$WEBHOOK" >/dev/null || true
+          }
+
+          if [ "${UNREACHABLE:-}" = "true" ]; then
+            post "🟠 fleet-watchdog could not reach the Worker — the fleet is UNMONITORED right now. $RUN_URL"
+            exit 0
+          fi
+
+          # Quiet by design: nothing changed state, so say nothing.
+          [ -z "${ALERTS:-}" ] && { echo "no state changes"; exit 0; }
+
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            post "$line"
+          done <<< "$ALERTS"
