@@ -19,7 +19,9 @@ COPY . .
 # Install Python dependencies using uv sync
 # Fleet ops (khglynn): +valkey extra — without it the Redis-backed OAuth proxy
 # storage silently falls back to ephemeral disk (plan-adversary C1)
-RUN uv sync --frozen --no-dev --extra disk --extra valkey
+# --extra otel (upstream v1.22.2) ships the OpenTelemetry SDK/exporter so tracing
+# can be enabled at runtime via OTEL_* env vars; no-op unless an OTLP endpoint is set.
+RUN uv sync --frozen --no-dev --extra disk --extra valkey --extra otel
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash app \
