@@ -2,6 +2,13 @@
 # Design (2026-07-08 fleet plan): tag-based intake → sync branch → PR carrying
 # release notes + diff stat + a 7-day aging window (supply-chain hedge; the
 # `security-override` label is the KEV/EPSS fast lane, enforced by fleet-ci).
+#
+# Conflict handling (added 2026-07-27, after v1.22.2 intake died silently):
+# a conflicting merge used to `exit 1` mid-step, which made GitHub SKIP the
+# Slack step — so the one outcome that NEEDS a human produced no notification
+# at all, only a red X in a tab nobody watches. Silence must never mean
+# "nothing to do." Now a conflict files an idempotent issue carrying the
+# conflicting-file list plus a copy-paste resolution recipe, and notifies.
 name: fleet-release-watch
 on:
   schedule:
@@ -11,6 +18,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
   watch:
@@ -33,21 +41,54 @@ jobs:
           echo "latest=$latest current=$current"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
           if [ "$latest" = "$current" ]; then echo "behind=false" >> "$GITHUB_OUTPUT"; else echo "behind=true" >> "$GITHUB_OUTPUT"; fi
-      - name: Open sync PR if behind (idempotent)
+      - name: Open sync PR if behind (idempotent; files an issue on conflict)
+        id: intake
         if: steps.cmp.outputs.behind == 'true'
         env:
           GH_TOKEN: ${{ secrets.FLEET_PAT || github.token }}
           LATEST: ${{ steps.cmp.outputs.latest }}
         run: |
+          set -euo pipefail
+          # `outcome` is the single source of truth for the notify step. It is
+          # deliberately NOT pre-seeded: an unset value means this step died
+          # before reaching any known branch, which the notify step reports as
+          # a red unexpected-failure rather than swallowing.
           if gh pr list --repo "$GITHUB_REPOSITORY" --head "sync/$LATEST" --state open --json number -q length | grep -qv '^0$'; then
-            echo "sync PR for $LATEST already open"; exit 0
+            echo "sync PR for $LATEST already open"
+            echo "outcome=pr-already-open" >> "$GITHUB_OUTPUT"; exit 0
           fi
           git config user.name "fleet-release-watch"
           git config user.email "noreply@github.com"
-          git remote add upstream https://github.com/taylorwilsdon/google_workspace_mcp.git
+          git remote add upstream https://github.com/taylorwilsdon/google_workspace_mcp.git 2>/dev/null || true
           git fetch upstream --tags --quiet
           git checkout -b "sync/$LATEST"
-          git merge --no-edit "$LATEST"
+
+          # --- the conflict fork -------------------------------------------
+          if ! git merge --no-edit "$LATEST"; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            git merge --abort || true
+            echo "merge conflicts in: $conflicts"
+
+            # idempotent: one open issue per tag, never a daily duplicate.
+            # Exact title match, not --search: search is fuzzy and would let a
+            # near-miss re-file the same issue every morning (noise kills trust).
+            existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label fleet-sync \
+              --json title \
+              -q "[.[] | select(.title == \"sync: upstream $LATEST needs manual conflict resolution\")] | length")
+            if [ "$existing" != "0" ]; then
+              echo "conflict issue for $LATEST already open"
+              echo "outcome=conflict-already-filed" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "sync: upstream $LATEST needs manual conflict resolution" \
+              --label fleet-sync \
+              --body "$(printf 'Automated intake of upstream **%s** hit merge conflicts, so the sync PR was NOT opened. The merge was aborted cleanly — nothing was pushed.\n\n**Conflicting files:**\n```\n%s\n```\n\n**Resolve locally** (from the `google-souped-up-mcp` checkout):\n```\ngit fetch origin && git checkout main && git pull --ff-only\ngit fetch upstream --tags\ngit checkout -b sync/%s\ngit merge %s\n# resolve the files above, keeping BOTH the fork customizations and upstream changes\n# (uv.lock: take upstream, then run `uv lock` to reconcile)\ngit add -A && git commit\ngit push -u origin sync/%s\ngh pr create --base main --head sync/%s --label fleet-sync --title "sync: upstream %s"\n```\n\nThe usual fork customizations that cause conflicts live in `Dockerfile` (Trivy CVE pins, `--extra valkey`) and `uv.lock`. Check whether upstream converged on the same change before assuming a real conflict.\n\nAfter merging, **redeploy the fleet** — merging here does not update Cloud Run: `deploy/deploy-personal.sh --account <trimm|kevnhg|kkevinhg|chryslerbend>`.\n\n_Filed automatically by fleet-release-watch. Closing this issue does not resolve the drift; the watcher will re-file if the sync is still pending._' \
+                "$LATEST" "$conflicts" "$LATEST" "$LATEST" "$LATEST" "$LATEST" "$LATEST")"
+            echo "outcome=conflict-issue-filed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # --- clean merge: the normal path --------------------------------
           git push origin "sync/$LATEST"
           notes=$(gh api "repos/taylorwilsdon/google_workspace_mcp/releases/tags/$LATEST" -q .body | head -c 4000)
           stat=$(git diff --stat "origin/main..HEAD" | tail -5)
@@ -57,13 +98,28 @@ jobs:
             --title "sync: upstream $LATEST" \
             --label fleet-sync \
             --body "$(printf 'Upstream release intake: **%s**\n\n**Aging window:** do not merge before **%s** (7-day supply-chain hedge; label `security-override` + cite the CVE for the fast lane).\n\n**Agent-facing files changed (review as a security surface):**\n```\n%s\n```\n\n**Diff stat (tail):**\n```\n%s\n```\n\n**Upstream release notes:**\n\n%s' "$LATEST" "$not_before" "$agents" "$stat" "$notes")"
+          echo "outcome=pr-opened" >> "$GITHUB_OUTPUT"
       - name: Notify Slack
-        if: steps.cmp.outputs.behind == 'true'
+        # always() so this reports the conflict path AND any unexpected crash
+        # in the step above — the whole point of the 2026-07-27 hardening is
+        # that a failure must never be silent.
+        if: always() && steps.cmp.outputs.behind == 'true'
         continue-on-error: true
         env:
           WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
           LATEST: ${{ steps.cmp.outputs.latest }}
+          OUTCOME: ${{ steps.intake.outputs.outcome }}
+          INTAKE_RESULT: ${{ steps.intake.outcome }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           [ -z "$WEBHOOK" ] && { echo "no webhook configured; skipping"; exit 0; }
+          case "${OUTCOME:-}" in
+            pr-opened)             text="📦 workspace-mcp: upstream $LATEST intake PR opened (7-day aging) → https://github.com/$REPO/pulls";;
+            conflict-issue-filed)  text="⚠️ workspace-mcp: upstream $LATEST intake hit MERGE CONFLICTS — issue filed with a resolution recipe → https://github.com/$REPO/issues";;
+            conflict-already-filed) text="⏳ workspace-mcp: upstream $LATEST still awaiting manual conflict resolution → https://github.com/$REPO/issues";;
+            pr-already-open)       text="⏳ workspace-mcp: upstream $LATEST sync PR still open → https://github.com/$REPO/pulls";;
+            *)                     text="🔴 workspace-mcp: upstream $LATEST intake FAILED unexpectedly (step result: ${INTAKE_RESULT:-unknown}) — check the run: $RUN_URL";;
+          esac
           curl -sS -X POST -H 'Content-Type: application/json' \
-            -d "{\"text\":\"📦 workspace-mcp: upstream $LATEST intake PR opened (7-day aging) → https://github.com/$GITHUB_REPOSITORY/pulls\"}" "$WEBHOOK"
+            --data "$(printf '{"text":%s}' "$(printf '%s' "$text" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")" "$WEBHOOK"
