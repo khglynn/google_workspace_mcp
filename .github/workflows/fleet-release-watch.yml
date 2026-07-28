@@ -12,7 +12,7 @@
 name: fleet-release-watch
 on:
   schedule:
-    - cron: "17 14 * * *" # daily, 09:17 CT
+    - cron: "20 20 * * *" # daily, ~3:20pm CT — Kevin's anchor window (2026-07-27: non-critical pings cluster ~3pm CT; only real alarms go off-hours)
   workflow_dispatch: {}
 
 permissions:
