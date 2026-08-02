@@ -22,12 +22,19 @@ name: fleet-watchdog
 
 on:
   schedule:
-    # Every 10 minutes. Cloud Run instances go idle in roughly 15, so this keeps
-    # one resident per account and first contact never eats the ~13s cold start
-    # that broke the kkevin OAuth reconnect on 2026-07-27. GitHub's scheduler
-    # runs late under load, which is fine: warming and keepalive degrade
-    # gracefully, and alerting does not care about a few minutes.
-    - cron: "*/10 * * * *"
+    # Every 5 minutes REQUESTED — measured ACTUAL cadence is what matters here.
+    # The first version said */10 and claimed scheduler lateness "is fine:
+    # warming degrades gracefully." Measured 2026-08-02: it was NOT fine —
+    # GitHub drifted */10 to an actual 36-53 minutes, Cloud Run idles out in
+    # ~15, so every probe hit a cold container, and two cold starts that blew
+    # the 30s probe timeout became the false "42-51 min outage" alerts of
+    # 07-28/07-29 (the same services answered the NEXT request in those very
+    # cycles). */5 drifts to roughly 15-25 real minutes — imperfect warming,
+    # but the Worker now classifies cold-but-alive separately from down, so a
+    # cold start whispers instead of paging. If warm-always ever matters more
+    # than $0, min-instances=1 on Cloud Run is the real fix (~$3-5/mo per
+    # service) — the watchdog then simply confirms it.
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 permissions: {}
