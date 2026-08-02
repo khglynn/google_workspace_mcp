@@ -109,7 +109,7 @@ jobs:
             if ! gh issue create --repo "$GITHUB_REPOSITORY" \
               --title "sync: upstream $LATEST needs manual conflict resolution" \
               --label fleet-sync \
-              --body "$(printf 'Automated intake of upstream **%s** hit merge conflicts, so the sync PR was NOT opened. The merge was aborted cleanly — nothing was pushed.\n\n**Conflicting files:**\n```\n%s\n```\n\n**Resolve locally** (from the `google-souped-up-mcp` checkout):\n```\ngit fetch origin && git checkout main && git pull --ff-only\ngit fetch upstream --tags\ngit checkout -b sync/%s\ngit merge %s\n# resolve the files above, keeping BOTH the fork customizations and upstream changes\n# (uv.lock: never hand-merge — git can pair the version line from one side with the hashes from the other, which yields a lockfile that looks resolved and is not. Take one side whole, then regenerate: git checkout --theirs uv.lock && uv lock)\ngit add -A && git commit\ngit push -u origin sync/%s\ngh pr create --base main --head sync/%s --label fleet-sync --title "sync: upstream %s"\n```\n\nThe usual fork customizations that cause conflicts live in `Dockerfile` (Trivy CVE pins, `--extra valkey`) and `uv.lock`. Check whether upstream converged on the same change before assuming a real conflict.\n\nAfter merging, **redeploy the fleet** — merging here does not update Cloud Run: `deploy/deploy-personal.sh --account <trimm|kevnhg|kkevinhg|chryslerbend>`.\n\n_Filed automatically by fleet-release-watch. Closing this issue does not resolve the drift; the watcher will re-file if the sync is still pending._' \
+              --body "$(printf 'Automated intake of upstream **%s** hit merge conflicts, so the sync PR was NOT opened. The merge was aborted cleanly — nothing was pushed.\n\n**Conflicting files:**\n```\n%s\n```\n\n**Resolve locally** (from the `google-souped-up-mcp` checkout):\n```\ngit fetch origin && git checkout main && git pull --ff-only\ngit fetch upstream --tags\ngit checkout -b sync/%s\ngit merge %s\n# resolve the files above, keeping BOTH the fork customizations and upstream changes\n# (uv.lock: never hand-merge — git can pair the version line from one side with the hashes from the other, which yields a lockfile that looks resolved and is not. Take one side whole, then regenerate: git checkout --ours uv.lock && uv lock. Use --ours, NOT --theirs: uv lock is minimal-change and keeps whatever pins the starting side carried, so starting from the fork preserves fork-only security bumps upstream has not adopted. On v1.23.0, --theirs would have reverted the click 8.3.3 PYSEC-2026-2132 fix back to 8.3.2 and failed the blocking OSV gate.)\ngit add -A && git commit\ngit push -u origin sync/%s\ngh pr create --base main --head sync/%s --label fleet-sync --title "sync: upstream %s"\n```\n\nThe usual fork customizations that cause conflicts live in `Dockerfile` (Trivy CVE pins, `--extra valkey`) and `uv.lock`. Check whether upstream converged on the same change before assuming a real conflict.\n\nAfter merging, **redeploy the fleet** — merging here does not update Cloud Run: `deploy/deploy-personal.sh --account <trimm|kevnhg|kkevinhg|chryslerbend>`.\n\n_Filed automatically by fleet-release-watch. Closing this issue does not resolve the drift; the watcher will re-file if the sync is still pending._' \
                 "$LATEST" "$conflicts" "$LATEST" "$LATEST" "$LATEST" "$LATEST" "$LATEST")"; then
               echo "issue filing failed — falling back to a Slack-only notification"
               echo "outcome=conflict-no-tracker" >> "$GITHUB_OUTPUT"; exit 0
@@ -119,10 +119,19 @@ jobs:
           fi
           # --- clean merge: the normal path --------------------------------
           git push origin "sync/$LATEST"
-          notes=$(gh api "repos/taylorwilsdon/google_workspace_mcp/releases/tags/$LATEST" -q .body | head -c 4000)
+          rel=$(gh api "repos/taylorwilsdon/google_workspace_mcp/releases/tags/$LATEST")
+          notes=$(printf '%s' "$rel" | jq -r '.body // ""' | head -c 4000)
           stat=$(git diff --stat "origin/main..HEAD" | tail -5)
           agents=$(git diff --name-only "origin/main..HEAD" | grep -E '^(skills/|.*SKILL\.md|.*\.claude)' || echo "(none)")
-          not_before=$(date -u -d "+7 days" +%Y-%m-%d)
+          # The announced deadline has to agree with the gate that enforces it
+          # (aging-window in fleet-ci.yml), which ages from the upstream publish
+          # date rather than from whenever this watcher happened to run.
+          published=$(printf '%s' "$rel" | jq -r '.published_at // empty')
+          if [ -n "$published" ]; then
+            not_before=$(date -u -d "$published +7 days" +%Y-%m-%d)
+          else
+            not_before=$(date -u -d "+7 days" +%Y-%m-%d)
+          fi
           gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "sync/$LATEST" \
             --title "sync: upstream $LATEST" \
             --label fleet-sync \
