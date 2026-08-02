@@ -5,6 +5,14 @@ name: fleet-ci
 on:
   pull_request:
     branches: [main]
+    # `labeled`/`unlabeled` are NOT in the default type set
+    # ([opened, synchronize, reopened]), and the aging gate below keys off the
+    # `fleet-sync` label. Without them, a PR labelled after it was opened is
+    # evaluated against an empty labels array, concludes "not a sync PR", and
+    # passes without ever checking the window. Re-running does not help: a
+    # re-run replays the original event payload, labels and all.
+    # (Found 2026-08-02 on the v1.23.0 sync, PR #11.)
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch: {}
 
 permissions:
@@ -86,7 +94,9 @@ jobs:
         run: uvx zizmor .github/workflows/fleet-*.yml
 
   aging-window:
-    # Sync PRs must age 7 days before merge (supply-chain hedge). Fast lane:
+    # Sync PRs must age 7 days before merge (supply-chain hedge). The clock runs
+    # from the UPSTREAM RELEASE's publish date — the quantity the policy is
+    # actually about — recovered from the `sync/<tag>` branch name. Fast lane:
     # `security-override` label. Non-sync PRs pass immediately.
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
@@ -97,10 +107,34 @@ jobs:
           # event data via env, never inline in the script (injection hygiene)
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CREATED: ${{ github.event.pull_request.created_at }}
+          # attacker-controllable on a fork PR — validated against a strict tag
+          # pattern below before it reaches any command
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          UPSTREAM: taylorwilsdon/google_workspace_mcp
         run: |
           echo "$LABELS" | grep -q 'fleet-sync' || { echo "not a sync PR — pass"; exit 0; }
           echo "$LABELS" | grep -q 'security-override' && { echo "security-override — fast lane"; exit 0; }
-          created="$CREATED"
-          age_days=$(( ( $(date -u +%s) - $(date -u -d "$created" +%s) ) / 86400 ))
-          echo "PR age: ${age_days}d (need 7)"
-          [ "$age_days" -ge 7 ] || { echo "❌ aging window not met — re-run after $(date -u -d "$created +7 days" +%Y-%m-%d)"; exit 1; }
+
+          # Clock source: the upstream release's publish date. Falls back to the
+          # PR's created_at when the tag cannot be resolved (unconventional
+          # branch name, release not found, API trouble). The fallback is never
+          # more permissive — a sync PR is opened after the release exists, so
+          # created_at >= published_at — so a lookup failure can only delay a
+          # merge, never wave one through early.
+          tag="${HEAD_REF#sync/}"
+          published=""
+          if [ "$tag" != "$HEAD_REF" ] && printf '%s' "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            published=$(gh release view "$tag" -R "$UPSTREAM" --json publishedAt -q .publishedAt 2>/dev/null || true)
+          fi
+
+          if [ -n "$published" ]; then
+            clock="$published"
+            echo "clock: upstream $tag published $published"
+          else
+            clock="$CREATED"
+            echo "clock: PR created_at $CREATED (upstream tag unresolved — conservative fallback)"
+          fi
+
+          age_days=$(( ( $(date -u +%s) - $(date -u -d "$clock" +%s) ) / 86400 ))
+          echo "age: ${age_days}d (need 7)"
+          [ "$age_days" -ge 7 ] || { echo "❌ aging window not met — merge on or after $(date -u -d "$clock +7 days" +%Y-%m-%d)"; exit 1; }
