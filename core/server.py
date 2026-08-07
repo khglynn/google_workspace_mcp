@@ -337,6 +337,27 @@ def _parse_bool_env(value: str) -> bool:
     return value.lower() in ("1", "true", "yes", "on")
 
 
+def _parse_int_env(name: str, default: int) -> int:
+    """Read a positive integer env var, falling back to ``default`` if unusable.
+
+    A typo in one of these knobs must not take the whole server down at startup,
+    so an unparseable or non-positive value warns loudly and yields the default
+    rather than raising out of ``configure_server_for_http``.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an integer; using default %d", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("%s=%d must be positive; using default %d", name, value, default)
+        return default
+    return value
+
+
 def _parse_allowed_redirect_uris(value: Optional[str]) -> Optional[List[str]]:
     """Parse a comma-separated list of OAuth client redirect URIs.
 
@@ -676,6 +697,56 @@ def configure_server_for_http():
                         "OAuth 2.1: restricting DCR client redirect URIs to allowlist: %s",
                         allowed_client_redirect_uris,
                     )
+                # Client-facing token lifetime, decoupled from Google's ~1h access
+                # token. Left at FastMCP's default the client is handed a token that
+                # expires hourly, and claude.ai's custom-connector refresh is
+                # unreliable (anthropics/claude-ai-mcp#702, #228 — open as of
+                # 2026-08-07), so every idle hour surfaced as a re-auth prompt.
+                # Safe to outlive Google's token only because #886/#942 taught
+                # _build_credentials_from_provider to walk jti -> upstream store and
+                # recover the Google *refresh* token, so each request transparently
+                # refreshes upstream. The FastMCP JWT is a reference, not a bearer of
+                # Google access: a revoked upstream session still fails validation.
+                client_access_token_ttl = _parse_int_env(
+                    "WORKSPACE_MCP_CLIENT_ACCESS_TOKEN_TTL", 604800
+                )
+                # Refresh upstream this many seconds early so a token that passes the
+                # expiry check can't lapse mid-request.
+                token_refresh_margin = _parse_int_env(
+                    "WORKSPACE_MCP_TOKEN_REFRESH_MARGIN", 300
+                )
+                # Consent screen. FastMCP's "remember" mode is not an option here: it
+                # only goes silent when Sec-Fetch-Site is same-origin/same-site/none
+                # (fastmcp oauth_proxy/consent.py), and the claude.ai -> Cloud Run
+                # redirect is cross-site, so it would prompt on every re-auth anyway.
+                # Disabled by default: the confused-deputy attack it backstops is
+                # already blocked by the strict allowed_client_redirect_uris allowlist
+                # above. Set to true / remember / external to re-enable. FastMCP logs
+                # its own "consent screen disabled" warning at startup when this is
+                # false — that is expected here, not a misconfiguration to chase.
+                require_consent_raw = os.getenv(
+                    "WORKSPACE_MCP_REQUIRE_CONSENT", ""
+                ).strip()
+                require_consent: bool | str
+                if require_consent_raw.lower() in ("remember", "external"):
+                    require_consent = require_consent_raw.lower()
+                else:
+                    require_consent = _parse_bool_env(require_consent_raw)
+                # NOTE on Google's prompt=consent, which GoogleProvider sets alongside
+                # access_type=offline. On THIS path it cannot be made conditional:
+                # extra_authorize_params is a static dict fixed at construction and
+                # replayed unchanged on every authorization (fastmcp oauth_proxy/
+                # consent.py), with no per-request hook to check for an existing
+                # upstream refresh token. The legacy start_auth_flow path does vary it
+                # — see _determine_oauth_prompt in auth/google_auth.py — but that helper
+                # is not reachable from the OAuth 2.1 proxy flow that claude.ai uses.
+                # Forcing it off globally would be worse than leaving it: without
+                # prompt=consent Google returns a refresh token only on the FIRST
+                # authorization, so later re-auths would yield none and sessions would
+                # again die at Google's 1h mark. The cost is that each authorization
+                # burns one of Google's 100 refresh tokens per (account, client id) —
+                # mitigated by re-authing far less often (this change) and, if it ever
+                # bites, by giving each service its own OAuth client id.
                 provider = GoogleProvider(
                     client_id=config.client_id,
                     client_secret=config.client_secret,
@@ -686,6 +757,16 @@ def configure_server_for_http():
                     client_storage=client_storage,
                     jwt_signing_key=jwt_signing_key,
                     allowed_client_redirect_uris=allowed_client_redirect_uris,
+                    fastmcp_access_token_expiry_seconds=client_access_token_ttl,
+                    token_expiry_threshold_seconds=token_refresh_margin,
+                    require_authorization_consent=require_consent,
+                )
+                logger.info(
+                    "OAuth 2.1: client access token TTL %ds, upstream refresh margin %ds, "
+                    "authorization consent %s",
+                    client_access_token_ttl,
+                    token_refresh_margin,
+                    require_consent,
                 )
                 if provider.client_registration_options is not None:
                     # Keep protocol-level auth limited to base identity scopes, but
