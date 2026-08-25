@@ -51,7 +51,11 @@ calendar:
     - query_freebusy
     - manage_out_of_office
     - manage_focus_time
-  complete: []
+  complete:
+    # remembrall: fork-local tool, not upstream (see gcalendar/calendar_tools.py,
+    # Remembrall gate-2 C16). Tier filtering is a NAME allowlist — drop this line
+    # in an upstream sync and the tool vanishes from the served list silently.
+    - calendar_acl_list
 
 docs:
   core:

@@ -2550,3 +2550,115 @@ async def create_calendar(
         f"[create_calendar] Created calendar '{calendar_summary}' with ID: {calendar_id}"
     )
     return f"Created calendar '{calendar_summary}' (ID: {calendar_id})"
+
+
+# ---------------------------------------------------------------------------
+# remembrall: FORK-LOCAL TOOL — not upstream. Added 2026-08-25 for the
+# Remembrall project, gate-2 C16 (authorized read of a fleet account's own
+# calendar sharing settings).
+#
+# NOTE: this fork is a PUBLIC repo while the deploy layer that names the fleet
+# accounts is private — keep account nicknames, emails and service URLs out of
+# comments here.
+#
+# UPSTREAM-REBASE TRIAGE. This whole block is additive and lives at the end of
+# the file, so an upstream sync should never conflict inside it. It has exactly
+# ONE companion edit elsewhere: `calendar_acl_list` listed under
+# `calendar: complete:` in core/tool_tiers.yaml. If that YAML line is lost in a
+# sync, this tool still imports but core.tool_registry.filter_server_tools()
+# silently drops it from the served tool list — every fleet service runs
+# TOOL_TIER=complete, and tier filtering is an allowlist by tool NAME. Re-apply
+# both edits or neither.
+#
+# SCOPE VERDICT: COVERED — no re-consent needed on any fleet account.
+#   Google requires one of `.../auth/calendar`, `.../auth/calendar.acls`, or
+#   `.../auth/calendar.acls.readonly` for acl.list. Note what is NOT on that
+#   list: `.../auth/calendar.readonly` — i.e. the "calendar_read" scope group
+#   that list_calendars/get_events/query_freebusy use. A readonly-only token
+#   403s on acl.list, which is why this tool declares "calendar" instead.
+#   The fleet already requests and holds the full CALENDAR_SCOPE (auth/scopes.py
+#   CALENDAR_SCOPES is the non-read-only map, used whenever the calendar service
+#   is enabled and read-only mode is off — true for all five services), so every
+#   existing session satisfies this requirement as-is.
+#   DO NOT "tighten" this to calendar.acls.readonly. That scope is not in the
+#   granted set, so requiring it would force a fresh OAuth consent on every
+#   account in the fleet.
+#
+# Read-only on purpose: there is deliberately no acl insert/update/delete
+# counterpart. Reading who a calendar is shared with is an audit operation;
+# changing it is not, and is not what C16 asked for.
+# ---------------------------------------------------------------------------
+
+
+@server.tool(
+    title="List Calendar ACL",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("calendar_acl_list", is_read_only=True, service_type="calendar")
+@require_google_service("calendar", "calendar")
+async def calendar_acl_list(
+    service,
+    user_google_email: str,
+    calendar_id: str = "primary",
+    max_results: int = 100,
+) -> str:
+    """
+    Retrieves the access control list (sharing settings) of a Google Calendar.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        calendar_id (str): The ID of the calendar whose sharing rules to read. Use 'primary' for the user's primary calendar. Defaults to 'primary'. Calendar IDs can be obtained using `list_calendars`.
+        max_results (int): The maximum number of access rules to return. Defaults to 100.
+
+    Returns:
+        str: A formatted list of the calendar's access rules. Each rule reports its scope type ('user', 'group', 'domain', or 'default'), the scope value (an email address for user/group, a domain name for domain, and nothing for 'default' — which means everyone/public), and the role granted ('none', 'freeBusyReader', 'reader', 'writer', or 'owner').
+    """
+    logger.info(
+        f"[calendar_acl_list] Invoked. Email: '{user_google_email}', calendar_id: '{calendar_id}'"
+    )
+
+    acl_response = await asyncio.to_thread(
+        lambda: (
+            service.acl().list(calendarId=calendar_id, maxResults=max_results).execute()
+        )
+    )
+
+    items = acl_response.get("items", [])
+    if not items:
+        return f"No access rules found on calendar '{calendar_id}' for {user_google_email}."
+
+    rule_lines = []
+    for rule in items:
+        rule_scope = rule.get("scope", {})
+        scope_type = rule_scope.get("type", "unknown")
+        # A 'default' rule carries no value: its scope IS "everyone" (public).
+        scope_value = rule_scope.get("value") or (
+            "(public - anyone)" if scope_type == "default" else "(none)"
+        )
+        role = rule.get("role", "unknown")
+        rule_lines.append(
+            f"- {scope_type}: {scope_value} — role: {role} (rule ID: {rule.get('id', 'unknown')})"
+        )
+
+    output_lines = [
+        f"Access rules on calendar '{calendar_id}' for {user_google_email} ({len(items)}):",
+        *rule_lines,
+    ]
+
+    # acl.list paginates. Say so rather than silently under-reporting the
+    # sharing surface — an audit tool that quietly truncates is worse than none.
+    if acl_response.get("nextPageToken"):
+        output_lines.append(
+            f"(More access rules exist beyond these {len(items)}. Re-run with a higher max_results to see the rest.)"
+        )
+
+    text_output = "\n".join(output_lines)
+    logger.info(
+        f"[calendar_acl_list] Listed {len(items)} access rule(s) on '{calendar_id}' for {user_google_email}."
+    )
+    return text_output
