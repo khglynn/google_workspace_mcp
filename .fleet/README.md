@@ -2,7 +2,7 @@
 
 **Added 2026-07-08.** This fork is the vetted deploy source for Kevin's personal
 Google Workspace MCP (Cloud Run). `main` = the exact upstream release we run,
-plus this ops layer (additive files only — no code divergence from upstream).
+plus this ops layer (was additive-files-only until 2026-08-25; first code divergence: `# remembrall:` blocks in gcalendar/calendar_tools.py + core/tool_tiers.yaml (read-only calendar_acl_list)).
 
 The five questions, answered (the whole pipeline in one box):
 
