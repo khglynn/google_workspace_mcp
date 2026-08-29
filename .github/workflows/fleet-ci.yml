@@ -29,14 +29,12 @@ jobs:
       - name: Frozen install (Shai-Hulud defense — exact locked versions only)
         run: uv sync --frozen
       - name: Tests
-        # --deselect: upstream shipped v1.22.0 with this one test broken
-        # (updateMask changed by their #862 forms fix, test not updated;
-        # verified failing on pristine v1.22.0 baseline 2026-07-09).
-        # Config-level workaround, no code divergence. Drop the deselect when
-        # an upstream release fixes it; report upstream meanwhile.
-        run: >-
-          uv run pytest -q
-          --deselect tests/gforms/test_forms_tools.py::test_set_publish_settings_builds_publish_state_body
+        # The v1.22.0-era --deselect of
+        # tests/gforms/test_forms_tools.py::test_set_publish_settings_builds_publish_state_body
+        # was dropped in the v1.25.2 intake: upstream fixed the test, verified
+        # passing on this branch 2026-08-29. Leaving a stale deselect in place
+        # would silently mask a real future regression in that test.
+        run: uv run pytest -q
 
   # Direct checksum-pinned binary — the official action is a reusable workflow
   # whose INTERNALS use tag-pinned actions, which our repo-level SHA-pinning
