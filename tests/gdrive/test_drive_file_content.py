@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from tests.helpers import _make_minimal_pdf
-from gdrive.drive_tools import get_drive_file_content
+from gdrive.drive_tools import _download_file_bytes, get_drive_file_content
 
 
 def _unwrap(tool):
@@ -57,8 +57,36 @@ class _FakeDownloader:
 def _patch_downloader(content_bytes):
     """Patch MediaIoBaseDownload to write content_bytes into the BytesIO handle."""
     return patch(
-        "gdrive.drive_tools.MediaIoBaseDownload",
-        side_effect=lambda fh, req: _FakeDownloader(fh, content_bytes),
+        "core.file_limits.MediaIoBaseDownload",
+        side_effect=lambda fh, req, chunksize=None: _FakeDownloader(fh, content_bytes),
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_file_bytes_supports_shared_drives():
+    mock_service = Mock()
+    mock_service.files().get_media.return_value = "req"
+
+    with _patch_downloader(b"content"):
+        result = await _download_file_bytes(mock_service, "file123")
+
+    assert result == b"content"
+    mock_service.files.return_value.get_media.assert_called_once_with(
+        fileId="file123", supportsAllDrives=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_file_bytes_leaves_export_request_unchanged():
+    mock_service = Mock()
+    mock_service.files().export_media.return_value = "req"
+
+    with _patch_downloader(b"exported"):
+        result = await _download_file_bytes(mock_service, "doc123", "text/plain")
+
+    assert result == b"exported"
+    mock_service.files.return_value.export_media.assert_called_once_with(
+        fileId="doc123", mimeType="text/plain"
     )
 
 
@@ -106,6 +134,26 @@ async def test_get_drive_file_content_pdf_empty(mock_resolve):
         )
 
     assert "get_drive_file_download_url" in result
+
+
+@pytest.mark.asyncio
+async def test_get_drive_file_content_reports_invalid_docx(mock_resolve):
+    mime_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    mock_resolve.return_value[1]["mimeType"] = mime_type
+    mock_service = Mock()
+    mock_service.files().get_media.return_value = "req"
+
+    with _patch_downloader(b"not a zip"):
+        result = await _unwrap(get_drive_file_content)(
+            service=mock_service,
+            user_google_email="user@example.com",
+            file_id="file123",
+        )
+
+    assert "appears damaged" in result
+    assert "unsupported text encoding" not in result
 
 
 # ---------------------------------------------------------------------------
