@@ -28,6 +28,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write        # the notify step records what it last said in a repo variable
 
 jobs:
   watch:
@@ -145,6 +146,7 @@ jobs:
         continue-on-error: true
         env:
           WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GH_TOKEN: ${{ secrets.FLEET_PAT || github.token }}
           LATEST: ${{ steps.cmp.outputs.latest }}
           OUTCOME: ${{ steps.intake.outputs.outcome }}
           CONFLICTS: ${{ steps.intake.outputs.conflicts }}
@@ -163,5 +165,29 @@ jobs:
             pr-already-open)       text="⏳ workspace-mcp: upstream $LATEST sync PR still open → https://github.com/$REPO/pulls";;
             *)                     text="🔴 workspace-mcp: upstream $LATEST intake FAILED unexpectedly (step result: ${INTAKE_RESULT:-unknown}) — check the run: $RUN_URL";;
           esac
+
+          # Say it once, then weekly — not daily (added 2026-09-14). Between 6 and
+          # 13 September this step posted the identical v1.26.0 conflict notice every
+          # afternoon; eight copies of one fact is how a channel gets muted. The last
+          # notice is kept in a repo variable as "<tag>|<outcome>|<date>"; the same
+          # tag+outcome stays quiet for seven days, then repeats once with a
+          # "still stuck" marker. The unexpected-failure case (the * arm above) is a
+          # broken watcher, so it still fires every day.
+          key="$LATEST|${OUTCOME:-unknown}"
+          today=$(date -u +%Y-%m-%d)
+          last=$(gh variable get FLEET_LAST_NOTICE --repo "$REPO" 2>/dev/null || true)
+          if [ -n "${OUTCOME:-}" ] && [ "${last%|*}" = "$key" ]; then
+            last_date=${last##*|}
+            age=$(( ( $(date -u -d "$today" +%s) - $(date -u -d "$last_date" +%s) ) / 86400 ))
+            if [ "$age" -lt 7 ]; then
+              echo "same notice as on $last_date ($age days ago); staying quiet"
+              exit 0
+            fi
+            text="$text (still the case since $last_date)"
+          fi
           curl -sS -X POST -H 'Content-Type: application/json' \
             --data "$(printf '{"text":%s}' "$(printf '%s' "$text" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")" "$WEBHOOK"
+          # Best-effort: if the variable cannot be written the only cost is one
+          # repeated notice tomorrow, which is today's behaviour.
+          gh variable set FLEET_LAST_NOTICE --repo "$REPO" --body "$key|$today" \
+            || echo "could not record the notice (variables API); tomorrow may repeat it"
