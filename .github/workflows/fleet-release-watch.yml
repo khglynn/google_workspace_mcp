@@ -18,6 +18,21 @@
 # The issue is now a nice-to-have: the conflict path probes for a tracker,
 # treats filing as best-effort, and carries the conflicting-file list in the
 # Slack message so the notification never depends on the issues API at all.
+#
+# Notice-dedup state lives in git, not in an Actions variable (2026-09-16):
+# the once-then-weekly dedup (2026-09-14) first kept its "what did I last say"
+# record in the repo variable FLEET_LAST_NOTICE, and every write 403'd — with
+# FLEET_PAT ("Resource not accessible by personal access token") and then with
+# github.token (run 35033402081: `failed to set variable "FLEET_LAST_NOTICE":
+# HTTP 403: Resource not accessible by integration`). Writing Actions variables
+# needs a credential that carries the repo "Variables" permission: the built-in
+# GITHUB_TOKEN has no such scope at all (`actions: write` does not cover it),
+# and the fleet PAT lacks it. So no token this job holds can do it, and a token
+# swap is not a fix. The record now lives as one line in `last-notice.txt` on
+# the orphan branch `fleet-state`, written with the same authenticated `git
+# push origin` the intake step already proves works for sync branches. A push
+# to `fleet-state` triggers nothing: every `on: push` under .github/workflows
+# is scoped to `main` or `v*` tags.
 name: fleet-release-watch
 on:
   schedule:
@@ -28,7 +43,6 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  actions: write        # the notify step records what it last said in a repo variable
 
 jobs:
   watch:
@@ -146,10 +160,9 @@ jobs:
         continue-on-error: true
         env:
           WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-          # The workflow's own token, not FLEET_PAT: the PAT cannot write repo variables
-          # ("Resource not accessible by personal access token", first run 2026-09-14),
-          # and the job's `actions: write` is exactly what the built-in token needs here.
-          GH_TOKEN: ${{ github.token }}
+          # Where the last notice is remembered (see the header for why git).
+          STATE_BRANCH: fleet-state
+          STATE_FILE: last-notice.txt
           LATEST: ${{ steps.cmp.outputs.latest }}
           OUTCOME: ${{ steps.intake.outputs.outcome }}
           CONFLICTS: ${{ steps.intake.outputs.conflicts }}
@@ -172,13 +185,15 @@ jobs:
           # Say it once, then weekly — not daily (added 2026-09-14). Between 6 and
           # 13 September this step posted the identical v1.26.0 conflict notice every
           # afternoon; eight copies of one fact is how a channel gets muted. The last
-          # notice is kept in a repo variable as "<tag>|<outcome>|<date>"; the same
-          # tag+outcome stays quiet for seven days, then repeats once with a
-          # "still stuck" marker. The unexpected-failure case (the * arm above) is a
-          # broken watcher, so it still fires every day.
+          # notice is kept as "<tag>|<outcome>|<date>" in $STATE_FILE on the orphan
+          # branch $STATE_BRANCH; the same tag+outcome stays quiet for seven days,
+          # then repeats once with a "still stuck" marker. The unexpected-failure
+          # case (the * arm above) is a broken watcher, so it still fires every day.
+          # No branch yet (first run) reads as no prior notice.
           key="$LATEST|${OUTCOME:-unknown}"
           today=$(date -u +%Y-%m-%d)
-          last=$(gh variable get FLEET_LAST_NOTICE --repo "$REPO" 2>/dev/null || true)
+          git fetch --quiet origin "+refs/heads/$STATE_BRANCH:refs/remotes/origin/$STATE_BRANCH" 2>/dev/null || true
+          last=$(git show "refs/remotes/origin/$STATE_BRANCH:$STATE_FILE" 2>/dev/null || true)
           if [ -n "${OUTCOME:-}" ] && [ "${last%|*}" = "$key" ]; then
             last_date=${last##*|}
             age=$(( ( $(date -u -d "$today" +%s) - $(date -u -d "$last_date" +%s) ) / 86400 ))
@@ -190,7 +205,17 @@ jobs:
           fi
           curl -sS -X POST -H 'Content-Type: application/json' \
             --data "$(printf '{"text":%s}' "$(printf '%s' "$text" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')")" "$WEBHOOK"
-          # Best-effort: if the variable cannot be written the only cost is one
-          # repeated notice tomorrow, which is today's behaviour.
-          gh variable set FLEET_LAST_NOTICE --repo "$REPO" --body "$key|$today" \
-            || echo "could not record the notice (variables API); tomorrow may repeat it"
+          # Best-effort: if the state cannot be written the only cost is one
+          # repeated notice tomorrow, which is today's behaviour. Plumbing rather
+          # than a checkout: the working tree may be sitting on the sync branch
+          # the intake step just made, and this must not touch it. Parent = the
+          # branch tip when it exists, none on the first run (an orphan branch —
+          # the state shares no history with main). Plain push, never forced: the
+          # history is one line per notice.
+          blob=$(printf '%s\n' "$key|$today" | git hash-object -w --stdin)
+          tree=$(printf '100644 blob %s\t%s\n' "$blob" "$STATE_FILE" | git mktree)
+          parent=$(git rev-parse -q --verify "refs/remotes/origin/$STATE_BRANCH" || true)
+          commit=$(git -c user.name=fleet-release-watch -c user.email=noreply@github.com \
+            commit-tree "$tree" ${parent:+-p "$parent"} -m "last notice: $key|$today")
+          git push --quiet origin "$commit:refs/heads/$STATE_BRANCH" \
+            || echo "could not record the notice (push to $STATE_BRANCH failed); tomorrow may repeat it"
