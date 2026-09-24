@@ -1,6 +1,8 @@
 """Tests for Gmail body_format support across helper and public tool APIs."""
 
 import base64
+from email import message_from_bytes
+from email.policy import SMTP
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -8,10 +10,12 @@ import pytest
 
 import gmail.gmail_tools as gmail_tools
 from core.utils import UserInputError
+from gmail.gmail_helpers import _signature_html_to_text
 from gmail.gmail_tools import (
     _extract_message_bodies,
     _format_body_content,
     _html_to_text,
+    _prepare_gmail_message,
     get_gmail_message_content,
     get_gmail_messages_content_batch,
     get_gmail_thread_content,
@@ -162,6 +166,83 @@ class TestFormatBodyContentTextMode:
 
     def test_html_to_text_ignores_br_inside_skipped_tags(self):
         assert _html_to_text("<script>x<br>y</script><p>Visible</p>") == "Visible"
+
+
+class TestSignatureHtmlToText:
+    def test_preserves_explicit_signature_line_breaks(self):
+        signature = "<p>Best,</p><p><br></p><p>Alice</p>"
+
+        assert _signature_html_to_text(signature) == "Best,\n\nAlice"
+
+    def test_separates_nested_block_content(self):
+        signature = "<div>Name<div>Title</div><div>Phone</div></div>"
+
+        assert _signature_html_to_text(signature) == "Name\nTitle\nPhone"
+
+    def test_collapses_source_formatting_whitespace(self):
+        signature = """<div>Acme
+            Corporation</div>
+        <div>Engineering</div>"""
+
+        assert _signature_html_to_text(signature) == "Acme Corporation\nEngineering"
+
+
+class TestHtmlPlainTextAlternative:
+    """The text/plain alternative of an outgoing HTML message is what non-HTML
+    clients display, so it must keep the author's block structure."""
+
+    @staticmethod
+    def _parts(body: str) -> dict:
+        raw_b64, _, _, _ = _prepare_gmail_message(
+            subject="format test",
+            body=body,
+            to="recipient@example.com",
+            body_format="html",
+        )
+        message = message_from_bytes(base64.urlsafe_b64decode(raw_b64), policy=SMTP)
+        return {
+            part.get_content_type(): part.get_payload(decode=True).decode()
+            for part in message.walk()
+            if part.get_content_maintype() != "multipart"
+        }
+
+    def test_html_part_is_not_escaped(self):
+        body = "<p>First paragraph <strong>bold</strong>.</p><p>Second paragraph.</p>"
+
+        assert self._parts(body)["text/html"].strip() == body
+
+    def test_plain_part_keeps_paragraph_boundaries(self):
+        body = "<p>First paragraph <strong>bold</strong>.</p><p>Second paragraph.</p>"
+
+        plain = self._parts(body)["text/plain"]
+
+        assert plain.split() == ["First", "paragraph", "bold.", "Second", "paragraph."]
+        assert "bold.Second" not in plain
+
+    def test_plain_part_keeps_line_break_tags(self):
+        plain = self._parts("<div>Best,<br>Alice</div>")["text/plain"]
+
+        assert plain.strip().splitlines() == ["Best,", "Alice"]
+
+    def test_plain_part_separates_headings_from_following_text(self):
+        plain = self._parts("<h1>Quarterly update</h1><h2>Revenue</h2>")["text/plain"]
+
+        assert plain.strip().splitlines() == ["Quarterly update", "Revenue"]
+
+    def test_plain_part_separates_semantic_sections(self):
+        body = "<section>Section one.</section><section>Section two.</section>"
+
+        plain = self._parts(body)["text/plain"]
+
+        assert plain.strip().splitlines() == ["Section one.", "Section two."]
+        assert "one.Section" not in plain
+
+    def test_plain_part_keeps_body_ending_in_incomplete_entity(self):
+        # HTMLParser withholds a trailing "&" as a possibly-incomplete entity,
+        # so an unflushed parser drops the whole tail of the body.
+        plain = self._parts("<p>Tom &amp</p>")["text/plain"]
+
+        assert plain.strip() == "Tom &"
 
 
 class TestFormatBodyContentHtmlMode:
@@ -560,6 +641,34 @@ async def test_full_export_raw_saves_complete_eml(stdio_storage):
     # The saved file must hold the complete, decoded message.
     with open(_saved_path(result), "rb") as fh:
         assert fh.read().decode() == raw_mime
+
+
+@pytest.mark.asyncio
+async def test_full_export_rejects_size_estimate_before_fetch(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_MCP_MAX_FILE_BYTES", "100")
+    metadata = _metadata_response("msg-large")
+    metadata["sizeEstimate"] = 500
+    service = _build_service(
+        message_responses={
+            ("msg-large", "metadata"): metadata,
+            ("msg-large", "raw"): {"raw": _encode("should not be fetched")},
+        }
+    )
+
+    result = await _unwrap(get_gmail_message_content)(
+        service=service,
+        message_id="msg-large",
+        user_google_email="user@example.com",
+        body_format="raw",
+        full=True,
+    )
+
+    assert result.startswith("Error:")
+    assert "WORKSPACE_MCP_MAX_FILE_BYTES" in result
+    request_formats = [
+        call.kwargs["format"] for call in service.users().messages().get.call_args_list
+    ]
+    assert request_formats == ["metadata"]
 
 
 @pytest.mark.asyncio
