@@ -6,7 +6,7 @@ This module provides MCP tools for interacting with Google Slides API.
 
 import logging
 import asyncio
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from mcp.types import ToolAnnotations
 
@@ -62,8 +62,48 @@ def _iter_text_bearing_elements(
             yield from _iter_text_bearing_elements(children)
 
 
+def _describe_geometry(element: Dict[str, Any], indent: str) -> Optional[str]:
+    """Render a page element's placement in raw EMU, or None if it has none.
+
+    Slides stores placement as a `transform` (translate plus scale) applied to an
+    intrinsic `size`, and `batch_update_presentation` writes in those same terms,
+    so both are reported unrounded rather than pre-multiplied.
+    """
+    transform = element.get("transform") or {}
+    size = element.get("size") or {}
+    if not transform and not size:
+        return None
+
+    parts: List[str] = []
+    if transform:
+        unit = transform.get("unit", "EMU")
+        parts.append(
+            f"position: x={transform.get('translateX', 0)} "
+            f"y={transform.get('translateY', 0)} {unit}"
+        )
+        scale_x = transform.get("scaleX", 1)
+        scale_y = transform.get("scaleY", 1)
+        if scale_x != 1 or scale_y != 1:
+            parts.append(f"scale: x={scale_x} y={scale_y}")
+        shear_x = transform.get("shearX", 0)
+        shear_y = transform.get("shearY", 0)
+        if shear_x or shear_y:
+            parts.append(f"shear: x={shear_x} y={shear_y}")
+    if size:
+        width = size.get("width", {})
+        height = size.get("height", {})
+        unit = width.get("unit") or height.get("unit") or "EMU"
+        parts.append(
+            f"size: {width.get('magnitude', 'Unknown')} x "
+            f"{height.get('magnitude', 'Unknown')} {unit}"
+        )
+    return f"{indent}  {'   '.join(parts)}"
+
+
 def _describe_elements(
-    elements: Optional[List[Dict[str, Any]]], indent: str = "  "
+    elements: Optional[List[Dict[str, Any]]],
+    indent: str = "  ",
+    include_geometry: bool = False,
 ) -> List[str]:
     """Build descriptive lines for page elements, including text content for shapes.
 
@@ -80,6 +120,7 @@ def _describe_elements(
     info: List[str] = []
     for element in elements or []:
         element_id = element.get("objectId", "Unknown")
+        header_line = len(info)
         if "shape" in element:
             shape_type = element["shape"].get("shapeType", "Unknown")
             full_text = _extract_shape_text(element["shape"])
@@ -141,10 +182,49 @@ def _describe_elements(
         elif "elementGroup" in element:
             children = element["elementGroup"].get("children", [])
             info.append(f"{indent}Group: ID {element_id}, Children: {len(children)}")
-            info.extend(_describe_elements(children, indent + "  "))
+            info.extend(_describe_elements(children, indent + "  ", include_geometry))
         else:
             info.append(f"{indent}Element: ID {element_id}, Type: Unknown")
+
+        if include_geometry:
+            geometry = _describe_geometry(element, indent)
+            if geometry:
+                # Sits directly under the element's own line, above any text
+                # lines or nested children.
+                info.insert(header_line + 1, geometry)
     return info
+
+
+def _speaker_notes_shape(slide: Dict[str, Any]) -> Tuple[Optional[str], str]:
+    """Return ``(speaker_notes_object_id, current_notes_text)`` for a slide resource.
+
+    A slide's speaker notes live in the single BODY placeholder shape on its notes
+    page, identified by ``notesProperties.speakerNotesObjectId``. Only that shape's
+    text is writable; the rest of the notes page and the notes master are read-only.
+    The shape itself is occasionally absent for slides that have never had notes, in
+    which case the ID resolves but no text element exists yet. See:
+    https://developers.google.com/slides/api/guides/notes
+    """
+    notes_page = slide.get("slideProperties", {}).get("notesPage", {})
+    notes_object_id = notes_page.get("notesProperties", {}).get("speakerNotesObjectId")
+    if not notes_object_id:
+        return None, ""
+    for element in notes_page.get("pageElements", []):
+        if element.get("objectId") == notes_object_id:
+            return notes_object_id, _extract_shape_text(element.get("shape"))
+    return notes_object_id, ""
+
+
+def _describe_speaker_notes(slide: Dict[str, Any], indent: str = "    ") -> List[str]:
+    """Build lines describing a slide's speaker notes shape ID and current notes text."""
+    notes_object_id, notes_text = _speaker_notes_shape(slide)
+    if not notes_object_id:
+        return [f"{indent}Speaker Notes: none (slide has no notes placeholder)"]
+    lines = [line.rstrip() for line in notes_text.split("\n") if line.strip()]
+    header = f"{indent}Speaker Notes Shape ID: {notes_object_id}"
+    if not lines:
+        return [f"{header}, Notes: empty"]
+    return [f"{header}, Notes:"] + [f"{indent}  > {line}" for line in lines]
 
 
 @server.tool(
@@ -172,7 +252,7 @@ async def create_presentation(
         str: Details about the created presentation including ID and URL.
     """
     logger.info(
-        f"[create_presentation] Invoked. Email: '{user_google_email}', Title: '{title}'"
+        f"[create_presentation] Invoked. Email: '{user_google_email}', title_len={len(title)}"
     )
 
     body = {"title": title}
@@ -204,7 +284,11 @@ async def create_presentation(
 @handle_http_errors("get_presentation", is_read_only=True, service_type="slides")
 @require_google_service("slides", "slides_read")
 async def get_presentation(
-    service, user_google_email: str, presentation_id: str
+    service,
+    user_google_email: str,
+    presentation_id: str,
+    include_speaker_notes: bool = False,
+    include_geometry: bool = False,
 ) -> str:
     """
     Get details about a Google Slides presentation.
@@ -212,12 +296,23 @@ async def get_presentation(
     Args:
         user_google_email (str): The user's Google email address. Required.
         presentation_id (str): The ID of the presentation to retrieve.
+        include_speaker_notes (bool): Also report each slide's speaker (presenter)
+            notes and the object ID of the shape holding them. Pass True when you
+            need to read or edit notes: that shape ID is the only valid target for
+            insertText/deleteText on notes, and batch_update_presentation writes
+            notes by deleting the shape's existing text and inserting new text.
+            Defaults to False.
+        include_geometry (bool): Also list each slide's elements with their
+            placement - transform (translate, and scale/shear when not identity)
+            and intrinsic size, in raw EMU. Set this when adding slides to an
+            existing deck so new elements can match its established margins and
+            content width. Defaults to False.
 
     Returns:
         str: Details about the presentation including title, slides count, and metadata.
     """
     logger.info(
-        f"[get_presentation] Invoked. Email: '{user_google_email}', ID: '{presentation_id}'"
+        f"[get_presentation] Invoked. Email: '{user_google_email}', ID: '{presentation_id}', Notes: {include_speaker_notes}"
     )
 
     result = await asyncio.to_thread(
@@ -257,6 +352,14 @@ async def get_presentation(
         slides_info.append(
             f"  Slide {i}: ID {slide_id}, {len(page_elements)} element(s), text: {slide_text if slide_text else 'empty'}"
         )
+        if include_geometry:
+            slides_info.extend(
+                _describe_elements(page_elements, "    ", include_geometry=True)
+            )
+        # The unfiltered presentations.get response already carries each slide's
+        # notesPage, so reporting notes costs no extra API call.
+        if include_speaker_notes:
+            slides_info.extend(_describe_speaker_notes(slide))
 
     confirmation_message = f"""Presentation Details for {user_google_email}:
 - Title: {title}
@@ -302,6 +405,13 @@ async def batch_update_presentation(
         or shape first with createShape, set elementProperties.pageObjectId to
         the slide ID, and then insertText into that shape objectId. To edit
         existing text, call get_page and use a Shape or Table element ID.
+
+        To write speaker (presenter) notes, call get_presentation with
+        include_speaker_notes=True to get the slide's speaker notes shape ID,
+        then target that ID: deleteText with textRange {"type": "ALL"} to clear
+        the existing notes (omit this when they are already empty, which errors),
+        followed by insertText at insertionIndex 0. The notes page ID is not a
+        valid target.
 
     Args:
         user_google_email (str): The user's Google email address. Required.
@@ -366,7 +476,11 @@ async def batch_update_presentation(
 @handle_http_errors("get_page", is_read_only=True, service_type="slides")
 @require_google_service("slides", "slides_read")
 async def get_page(
-    service, user_google_email: str, presentation_id: str, page_object_id: str
+    service,
+    user_google_email: str,
+    presentation_id: str,
+    page_object_id: str,
+    include_geometry: bool = False,
 ) -> str:
     """
     Get details about a specific page (slide) in a presentation.
@@ -375,6 +489,13 @@ async def get_page(
         user_google_email (str): The user's Google email address. Required.
         presentation_id (str): The ID of the presentation.
         page_object_id (str): The object ID of the page/slide to retrieve.
+        include_geometry (bool): Also report each element's placement - its
+            transform (translate, and scale/shear when not identity) and intrinsic
+            size, in raw EMU. Set this when adding elements to an existing deck:
+            it is the only way to discover the deck's margins, gutters and content
+            width, which Slides exposes nowhere else, and it reports the same terms
+            batch_update_presentation writes. Defaults to False to keep the
+            default output's token cost unchanged.
 
     Returns:
         str: Details about the specific page including elements and layout.
@@ -398,7 +519,7 @@ async def get_page(
     # This is what makes the documented "call get_page and use a Shape or Table
     # element ID" workflow in batch_update_presentation actually viable for
     # text that lives inside a Group.
-    elements_info = _describe_elements(page_elements)
+    elements_info = _describe_elements(page_elements, include_geometry=include_geometry)
 
     confirmation_message = f"""Page Details for {user_google_email}:
 - Presentation ID: {presentation_id}
