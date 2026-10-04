@@ -62,15 +62,15 @@ async def test_formats_rules_including_public_default_rule():
     assert "(2):" in result
     assert "- user: a@example.com — role: owner" in result
     assert "- default: (public - anyone) — role: reader" in result
-    assert "More access rules exist" not in result
+    assert "Next page token" not in result
 
 
 @pytest.mark.asyncio
-async def test_says_when_results_are_truncated():
+async def test_hands_back_the_next_page_token():
     service = _service_returning(
         {
             "items": [{"id": "x", "scope": {"type": "domain", "value": "example.com"}}],
-            "nextPageToken": "next",
+            "nextPageToken": "tok-2",
         }
     )
 
@@ -81,8 +81,44 @@ async def test_says_when_results_are_truncated():
         max_results=1,
     )
 
+    service.acl().list.assert_called_with(calendarId="team@example.com", maxResults=1)
     assert "- domain: example.com — role: unknown" in result
-    assert "More access rules exist beyond these 1" in result
+    assert "More access rules exist beyond these 1. Next page token: tok-2" in result
+
+
+@pytest.mark.asyncio
+async def test_follows_a_page_token():
+    service = _service_returning(
+        {
+            "items": [
+                {
+                    "id": "y",
+                    "scope": {"type": "group", "value": "g@example.com"},
+                    "role": "reader",
+                }
+            ]
+        }
+    )
+
+    result = await _unwrap(calendar_tools.calendar_acl_list)(
+        service=service, user_google_email="a@example.com", page_token="tok-2"
+    )
+
+    service.acl().list.assert_called_with(
+        calendarId="primary", maxResults=100, pageToken="tok-2"
+    )
+    assert "- group: g@example.com — role: reader" in result
+    assert "Next page token" not in result
+
+
+@pytest.mark.asyncio
+async def test_empty_page_with_more_pages_still_returns_the_token():
+    service = _service_returning({"items": [], "nextPageToken": "tok-3"})
+    result = await _unwrap(calendar_tools.calendar_acl_list)(
+        service=service, user_google_email="a@example.com"
+    )
+    assert "more pages remain" in result
+    assert result.endswith("Next page token: tok-3")
 
 
 @pytest.mark.asyncio

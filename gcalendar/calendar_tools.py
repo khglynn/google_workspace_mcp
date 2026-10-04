@@ -2752,6 +2752,7 @@ async def calendar_acl_list(
     user_google_email: str,
     calendar_id: str = "primary",
     max_results: int = 100,
+    page_token: Optional[str] = None,
 ) -> str:
     """
     Retrieves the access control list (sharing settings) of a Google Calendar.
@@ -2759,7 +2760,8 @@ async def calendar_acl_list(
     Args:
         user_google_email (str): The user's Google email address. Required.
         calendar_id (str): The ID of the calendar whose sharing rules to read. Use 'primary' for the user's primary calendar. Defaults to 'primary'. Calendar IDs can be obtained using `list_calendars`.
-        max_results (int): The maximum number of access rules to return. Defaults to 100.
+        max_results (int): The maximum number of access rules to return in one page. Defaults to 100; Google caps a page at 250.
+        page_token (Optional[str]): Token for the next page, taken from a previous response's "Next page token" line.
 
     Returns:
         str: A formatted list of the calendar's access rules. Each rule reports its scope type ('user', 'group', 'domain', or 'default'), the scope value (an email address for user/group, a domain name for domain, and nothing for 'default' — which means everyone/public), and the role granted ('none', 'freeBusyReader', 'reader', 'writer', or 'owner').
@@ -2768,14 +2770,22 @@ async def calendar_acl_list(
         f"[calendar_acl_list] Invoked. Email: '{user_google_email}', calendar_id: '{calendar_id}'"
     )
 
+    params: Dict[str, Any] = {"calendarId": calendar_id, "maxResults": max_results}
+    if page_token:
+        params["pageToken"] = page_token
+
     acl_response = await asyncio.to_thread(
-        lambda: (
-            service.acl().list(calendarId=calendar_id, maxResults=max_results).execute()
-        )
+        lambda: service.acl().list(**params).execute()
     )
 
     items = acl_response.get("items", [])
+    next_page_token = acl_response.get("nextPageToken")
     if not items:
+        if next_page_token:
+            return (
+                f"No access rules on this page of calendar '{calendar_id}' for {user_google_email}, and more pages remain."
+                f"\nNext page token: {next_page_token}"
+            )
         return f"No access rules found on calendar '{calendar_id}' for {user_google_email}."
 
     rule_lines = []
@@ -2796,11 +2806,12 @@ async def calendar_acl_list(
         *rule_lines,
     ]
 
-    # acl.list paginates. Say so rather than silently under-reporting the
-    # sharing surface — an audit tool that quietly truncates is worse than none.
-    if acl_response.get("nextPageToken"):
+    # acl.list paginates (at most 250 rules a page). Hand back the token rather
+    # than silently under-reporting the sharing surface — an audit tool that
+    # quietly truncates is worse than none.
+    if next_page_token:
         output_lines.append(
-            f"(More access rules exist beyond these {len(items)}. Re-run with a higher max_results to see the rest.)"
+            f"\nMore access rules exist beyond these {len(items)}. Next page token: {next_page_token}"
         )
 
     text_output = "\n".join(output_lines)
