@@ -2,7 +2,7 @@
 
 **Added 2026-07-08.** This fork is the vetted deploy source for Kevin's personal
 Google Workspace MCP (Cloud Run). `main` = the exact upstream release we run,
-plus this ops layer (additive files only — no code divergence from upstream).
+plus this ops layer (was additive-files-only until 2026-08-25; first code divergence: `# remembrall:` blocks in gcalendar/calendar_tools.py + core/tool_tiers.yaml (read-only calendar_acl_list), guarded by tests/gcalendar/test_calendar_acl_list.py since 2026-10-04).
 
 The five questions, answered (the whole pipeline in one box):
 
@@ -12,7 +12,7 @@ The five questions, answered (the whole pipeline in one box):
 | Where does it run? | GitHub Actions on this fork (public repo → all security features free) |
 | Where does it remember? | The sync PR itself + `.fleet/heartbeat.log` + pinned version in `pyproject.toml` + the orphan branch `fleet-state` (the last Slack notice, so a stuck sync is said once, then weekly — an Actions variable was tried first and 403s for every token the job has) |
 | Where does a human approve? | Every sync PR: green `fleet-ci` gates + a 7-day aging window (label `security-override` + cite the CVE to fast-lane), then Kevin merges; deploys run from merged `main` only |
-| How do we know output stayed good? | `fleet-ci` (tests, OSV lockfile scan, Trivy container scan, zizmor) + post-deploy `fitness-check.sh` + weekly 💓 heartbeat to Slack — silence ≠ green: no heartbeat two Mondays running means the pipeline itself is broken |
+| How do we know output stayed good? | `fleet-ci` (tests, OSV lockfile scan, Trivy container scan, zizmor) + post-deploy `fitness-check.sh` + weekly 💓 heartbeat to Slack — silence ≠ green: no heartbeat two Thursdays running means the pipeline itself is broken |
 
 Companion pieces: Dependabot (grouped weekly updates + security alerts),
 CodeQL default setup, secret scanning + push protection — all repo settings,

@@ -51,7 +51,11 @@ calendar:
     - query_freebusy
     - manage_out_of_office
     - manage_focus_time
-  complete: []
+  complete:
+    # remembrall: fork-local tool, not upstream (see gcalendar/calendar_tools.py,
+    # Remembrall gate-2 C16). Tier filtering is a NAME allowlist — drop this line
+    # in an upstream sync and the tool vanishes from the served list silently.
+    - calendar_acl_list
 
 docs:
   core:
@@ -89,12 +93,14 @@ sheets:
     - list_sheet_tables
   complete:
     - create_sheet
+    - manage_sheet_tab
     - append_table_rows
     - resize_sheet_dimensions
     - move_sheet_rows
     - list_spreadsheet_comments
     - manage_spreadsheet_comment
     - manage_conditional_formatting
+    - manage_named_range
 
 chat:
   core:
@@ -163,20 +169,16 @@ search:
 
 appscript:
   core:
-    - list_script_projects
     - get_script_project
-    - get_script_content
-    - create_script_project
-    - update_script_content
+    - manage_script_project
+    - manage_script_content
     - run_script_function
     - generate_trigger_code
   extended:
+    - list_script_deployments
     - manage_deployment
-    - list_deployments
-    - delete_script_project
-    - list_versions
-    - create_version
-    - get_version
-    - list_script_processes
-    - get_script_metrics
+    - get_script_version
+    - manage_script_version
+    - get_script_activity
+    - manage_script_trigger
   complete: []
