@@ -3,7 +3,12 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Fleet ops (khglynn): `apt-get upgrade` pulls Debian security fixes released
+# after the python:3.11-slim tag was last rebuilt, so a base-image CVE stops
+# failing the blocking Trivy gate (and shipping) until Docker Hub catches up —
+# e.g. CVE-2026-103111, libpcre2-8-0 10.46-1~deb13u2 -> deb13u3 (2026-10-04).
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
