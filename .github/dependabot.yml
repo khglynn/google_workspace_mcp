@@ -8,7 +8,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "thursday"
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
@@ -18,5 +18,5 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "thursday"
     labels: ["fleet-deps"]

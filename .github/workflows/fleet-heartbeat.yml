@@ -6,7 +6,7 @@
 name: fleet-heartbeat
 on:
   schedule:
-    - cron: "35 20 * * 1" # Mondays, ~3:35pm CT — Kevin's anchor window (2026-07-27; staggered past release-watch :20)
+    - cron: "35 20 * * 4" # Thursdays, ~3:35pm CT — weekly automated things fire Thursday, not Monday (Kevin, 2026-10-04); staggered past release-watch :20
   workflow_dispatch: {}
 
 permissions:
