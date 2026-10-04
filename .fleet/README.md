@@ -10,7 +10,7 @@ The five questions, answered (the whole pipeline in one box):
 |---|---|
 | What starts the work? | `fleet-release-watch` (daily cron) sees a new upstream release tag |
 | Where does it run? | GitHub Actions on this fork (public repo → all security features free) |
-| Where does it remember? | The sync PR itself + `.fleet/heartbeat.log` + pinned version in `pyproject.toml` |
+| Where does it remember? | The sync PR itself + `.fleet/heartbeat.log` + pinned version in `pyproject.toml` + the orphan branch `fleet-state` (the last Slack notice, so a stuck sync is said once, then weekly — an Actions variable was tried first and 403s for every token the job has) |
 | Where does a human approve? | Every sync PR: green `fleet-ci` gates + a 7-day aging window (label `security-override` + cite the CVE to fast-lane), then Kevin merges; deploys run from merged `main` only |
 | How do we know output stayed good? | `fleet-ci` (tests, OSV lockfile scan, Trivy container scan, zizmor) + post-deploy `fitness-check.sh` + weekly 💓 heartbeat to Slack — silence ≠ green: no heartbeat two Mondays running means the pipeline itself is broken |
 
