@@ -2,7 +2,7 @@
 
 **Added 2026-07-08.** This fork is the vetted deploy source for Kevin's personal
 Google Workspace MCP (Cloud Run). `main` = the exact upstream release we run,
-plus this ops layer (was additive-files-only until 2026-08-25; first code divergence: `# remembrall:` blocks in gcalendar/calendar_tools.py + core/tool_tiers.yaml (read-only calendar_acl_list), guarded by tests/gcalendar/test_calendar_acl_list.py since 2026-10-04).
+plus this ops layer (was additive-files-only until 2026-08-25; first code divergence: `# remembrall:` blocks in gcalendar/calendar_tools.py + core/tool_tiers.yaml (read-only calendar_acl_list), guarded by tests/gcalendar/test_calendar_acl_list.py since 2026-10-04; second: the `create_event_no_guests` tool, a fork-local block at the end of gcalendar/calendar_tools.py + its line in core/tool_tiers.yaml, guarded by tests/gcalendar/test_create_event_no_guests.py since 2026-11-06).
 
 The five questions, answered (the whole pipeline in one box):
 

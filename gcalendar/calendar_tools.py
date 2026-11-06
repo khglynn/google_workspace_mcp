@@ -2881,7 +2881,7 @@ async def create_event_no_guests(
         summary (str): Event title.
         start_time (str): Start time. An RFC3339 UTC offset identifies the exact instant and is preserved. Without an offset, supply start_timezone or timezone. Date-only values create all-day events.
         end_time (str): End time, as start_time. All-day end dates are exclusive.
-        calendar_id (str): Calendar ID (default: 'primary', the user's own calendar).
+        calendar_id (str): Calendar ID (default: 'primary', the user's own calendar). On a calendar shared with other people, they see the event there, though nobody is invited or notified.
         description (Optional[str]): Event description.
         location (Optional[str]): Event location.
         timezone (Optional[str]): IANA timezone applied to both boundaries (e.g., "America/Chicago").
