@@ -69,7 +69,25 @@ def test_has_no_parameter_that_reaches_another_person():
         "rsvp_comment",
     }
     assert not params & reaching, params & reaching
-    assert params >= {"user_google_email", "summary", "start_time", "end_time"}
+    # The whole list, so any parameter added later fails here first: a client that trusts this
+    # tool's name to mean "reaches nobody" must re-check it before the new parameter ships.
+    assert params == {
+        "service",
+        "user_google_email",
+        "summary",
+        "start_time",
+        "end_time",
+        "calendar_id",
+        "description",
+        "location",
+        "timezone",
+        "reminders",
+        "use_default_reminders",
+        "transparency",
+        "recurrence",
+        "start_timezone",
+        "end_timezone",
+    }, params
 
 
 @pytest.mark.asyncio
