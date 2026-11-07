@@ -2819,3 +2819,105 @@ async def calendar_acl_list(
         f"[calendar_acl_list] Listed {len(items)} access rule(s) on '{calendar_id}' for {user_google_email}."
     )
     return text_output
+
+
+# ---------------------------------------------------------------------------
+# fork-local tool, not upstream (2026-11-06). An event on the account's own
+# calendar with no guests, and nothing else.
+#
+# Why a tool of its own rather than manage_event: manage_event can invite
+# (attendees), notify (send_updates), add a meeting link, change or delete
+# events other people are on and RSVP as the account, so a client that must
+# never reach other people refuses it by name. A rule that let manage_event
+# through only without attendees would have to read the call's arguments,
+# which an MCP client's permission rules may not do. So the guarantee lives in
+# this tool's shape instead: it has no parameter that reaches another person
+# (no attendees, guest rights, conference, attachments or send_updates), and
+# it always inserts with sendUpdates="none".
+#
+# Tier filtering is a NAME allowlist (core/tool_tiers.yaml): drop that line in
+# an upstream sync and the tool vanishes from a tiered service silently;
+# tests/gcalendar/test_create_event_no_guests.py guards both.
+# ---------------------------------------------------------------------------
+
+
+@server.tool(
+    title="Create Event (no guests)",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("create_event_no_guests", service_type="calendar")
+@require_google_service("calendar", "calendar_events")
+async def create_event_no_guests(
+    service,
+    user_google_email: str,
+    summary: str,
+    start_time: str,
+    end_time: str,
+    calendar_id: str = "primary",
+    description: Optional[str] = None,
+    location: Optional[str] = None,
+    timezone: Optional[str] = None,
+    reminders: Optional[Union[str, List[Dict[str, Any]]]] = None,
+    use_default_reminders: bool = True,
+    transparency: Optional[str] = None,
+    recurrence: Optional[StringList] = None,
+    *,
+    start_timezone: Optional[str] = None,
+    end_timezone: Optional[str] = None,
+) -> str:
+    """
+    Creates an event on the user's own calendar with no guests: nobody is invited or notified.
+    Use it to put something on the user's calendar just for them (a friend's visit, a flight,
+    a reminder). It cannot add attendees, a meeting link or attachments, and it never sends
+    updates; to invite people, the user does it themselves in Google Calendar.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        summary (str): Event title.
+        start_time (str): Start time. An RFC3339 UTC offset identifies the exact instant and is preserved. Without an offset, supply start_timezone or timezone. Date-only values create all-day events.
+        end_time (str): End time, as start_time. All-day end dates are exclusive.
+        calendar_id (str): Calendar ID (default: 'primary', the user's own calendar). On a calendar shared with other people, they see the event there, though nobody is invited or notified.
+        description (Optional[str]): Event description.
+        location (Optional[str]): Event location.
+        timezone (Optional[str]): IANA timezone applied to both boundaries (e.g., "America/Chicago").
+        reminders (Optional[Union[str, List[Dict[str, Any]]]]): Custom reminder objects.
+        use_default_reminders (bool): Whether to use the calendar's default reminders.
+        transparency (Optional[str]): "opaque" (busy) or "transparent" (free).
+        recurrence (Optional[List[str]]): RFC5545 recurrence rules, e.g. ["RRULE:FREQ=WEEKLY;COUNT=4"].
+        start_timezone (Optional[str]): IANA timezone for the start boundary only.
+        end_timezone (Optional[str]): IANA timezone for the end boundary only.
+
+    Returns:
+        str: Confirmation with the event's link and saved times.
+    """
+    return await _create_event_impl(
+        service,
+        user_google_email,
+        summary,
+        start_time,
+        end_time,
+        calendar_id=calendar_id,
+        description=description,
+        location=location,
+        attendees=None,
+        timezone=timezone,
+        attachments=None,
+        add_google_meet=False,
+        conference_data=None,
+        reminders=reminders,
+        use_default_reminders=use_default_reminders,
+        transparency=transparency,
+        visibility=None,
+        recurrence=recurrence,
+        guests_can_modify=None,
+        guests_can_invite_others=None,
+        guests_can_see_other_guests=None,
+        send_updates="none",
+        start_timezone=start_timezone,
+        end_timezone=end_timezone,
+    )
