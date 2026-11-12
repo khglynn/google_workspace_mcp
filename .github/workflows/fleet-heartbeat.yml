@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  actions: read # the daily security check's last scheduled run (fleet-ci.yml)
 
 jobs:
   heartbeat:
@@ -45,7 +46,31 @@ jobs:
             pat_note=" ⚠️ FLEET_PAT not configured"
           fi
 
-          msg="heartbeat: $(date -u +%Y-%m-%d) — pinned $current, upstream $latest, open sync PRs: $open_syncs$pat_note"
+          # The daily security check (fleet-ci.yml's schedule, added 2026-11-12)
+          # posts once when it turns red and is otherwise silent, so its last
+          # result rides along here: a check still red, or one whose schedule
+          # stopped, shows up every Thursday.
+          daily_note=", daily security check: no scheduled run yet"
+          daily=$(gh run list -R "$GITHUB_REPOSITORY" --workflow fleet-ci.yml --event schedule --branch main -L 1 \
+                    --json conclusion,createdAt -q '.[0] | select(.) | "\(.conclusion)|\(.createdAt)"' 2>/dev/null) || daily="error"
+          if [ "$daily" = error ]; then
+            daily_note=", ⚠️ daily security check: its runs couldn't be read"
+          elif [ -n "$daily" ]; then
+            verdict="${daily%%|*}"
+            ran="${daily#*|}"
+            case "$verdict" in
+              success) verdict="green" ;;
+              failure) verdict="RED" ;;
+              ""|null) verdict="running" ;;
+            esac
+            daily_note=", daily security check: $verdict (${ran%%T*})"
+            ran_s=$(date -u -d "$ran" +%s 2>/dev/null || echo 0)
+            if [ $(( $(date -u +%s) - ran_s )) -gt 259200 ]; then
+              daily_note="$daily_note ⚠️ no run in 3 days, its schedule may have stopped"
+            fi
+          fi
+
+          msg="heartbeat: $(date -u +%Y-%m-%d) — pinned $current, upstream $latest, open sync PRs: $open_syncs$pat_note$daily_note"
           echo "msg=$msg" >> "$GITHUB_OUTPUT"
           mkdir -p .fleet
           echo "$msg" >> .fleet/heartbeat.log

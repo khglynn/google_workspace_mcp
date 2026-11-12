@@ -1,6 +1,15 @@
 # Fleet ops: the trustworthy gate (dependency-security guide: prod-reachable +
 # High threshold + no continue-on-error on blocking jobs; a noisy gate trains
 # everyone to ignore it, so informational checks are separated and non-blocking).
+#
+# The daily check (added 2026-11-12). On pull requests this gate only sees a
+# lock that is changing, but new advisories land against a lock that is not:
+# 41 of them sat on main from 2026-10-26 to 2026-11-12 while Dependabot's
+# alerts reached no one. Kevin's call that day: "a daily re-check of main's
+# lock that posts ONE Slack message only when it finds a problem, otherwise
+# silent". So every morning the schedule below re-runs the two blocking scans
+# (dependency-audit, container-scan) against main and nothing else, and
+# notify-daily (the last job) says so once when either turns red.
 name: fleet-ci
 on:
   pull_request:
@@ -13,13 +22,26 @@ on:
     # re-run replays the original event payload, labels and all.
     # (Found 2026-08-02 on the v1.23.0 sync, PR #11.)
     types: [opened, synchronize, reopened, labeled, unlabeled]
-  workflow_dispatch: {}
+  schedule:
+    # 13:47 UTC = 7:47am CST / 8:47am CDT, "about 8am CT". GitHub starts
+    # schedules late under load, sometimes by half an hour. Schedules always
+    # run on the default branch, so this checks main.
+    - cron: "47 13 * * *"
+  workflow_dispatch:
+    inputs:
+      daily_check:
+        description: "Run only the daily check (the two blocking scans); a manual run prints what it would post and never posts"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   tests:
+    # Left out of the daily check, like the other non-scan jobs: overnight the
+    # code stays the same and only the advisories change.
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !inputs.daily_check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -50,6 +72,7 @@ jobs:
           ./osv-scanner --lockfile=uv.lock
 
   uv-audit-informational:
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !inputs.daily_check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -77,6 +100,7 @@ jobs:
           exit-code: "1"
 
   workflow-lint:
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !inputs.daily_check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -133,3 +157,86 @@ jobs:
           age_days=$(( ( $(date -u +%s) - $(date -u -d "$clock" +%s) ) / 86400 ))
           echo "age: ${age_days}d (need 7)"
           [ "$age_days" -ge 7 ] || { echo "❌ aging window not met — merge on or after $(date -u -d "$clock +7 days" +%Y-%m-%d)"; exit 1; }
+
+  notify-daily:
+    # The daily check's one message. It runs only when a scan failed on a
+    # scheduled run (or a manual daily_check run), and posts only when that is
+    # news: the previous scheduled run's scans were green, or they were red but
+    # that run's own post failed (so a failed post is retried the next morning,
+    # never lost). Red again after a message already went out: quiet. A problem
+    # is said once, not every morning until it is fixed, and the weekly
+    # heartbeat (fleet-heartbeat.yml) repeats the daily check's last result.
+    # A manual run prints the message and never posts.
+    needs: [dependency-audit, container-scan]
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.daily_check)) &&
+      contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read # the previous scheduled run's job results; nothing else
+    steps:
+      - name: Post once, on the change from green to red
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          EVENT: ${{ github.event_name }}
+          AUDIT_RESULT: ${{ needs.dependency-audit.result }}
+          IMAGE_RESULT: ${{ needs.container-scan.result }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          failed=""
+          if [ "$AUDIT_RESULT" = failure ]; then failed="the dependency scan of uv.lock (dependency-audit)"; fi
+          if [ "$IMAGE_RESULT" = failure ]; then failed="${failed:+$failed and }the container image scan (container-scan)"; fi
+
+          # What the last scheduled run on main left behind, other than this
+          # run. Runs that ended cancelled or skipped have no verdict and are
+          # passed over. Its job results decide:
+          #   said     a scan was red and its notify-daily succeeded: already told
+          #   green    both scans passed: this is news
+          #   unsaid   a scan was red but its post failed: tell now
+          #   none     no earlier scheduled run: this is news
+          #   unknown  the API didn't answer as expected: tell now, and say so
+          last="unknown"
+          prev=""
+          if prev=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/fleet-ci.yml/runs?event=schedule&branch=main&status=completed&per_page=30" \
+              | jq -r --argjson me "$RUN_ID" \
+                '[.workflow_runs[] | select(.id != $me and (.conclusion == "success" or .conclusion == "failure"))][0].id // ""'); then
+            if [ -z "$prev" ]; then
+              last="none"
+            elif state=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$prev/jobs?per_page=100" \
+                | jq -r '(.jobs | map({(.name): .conclusion}) | add // {}) as $c
+                  | if ($c["dependency-audit"] == "failure" or $c["container-scan"] == "failure")
+                    then (if $c["notify-daily"] == "success" then "said" else "unsaid" end)
+                    elif ($c["dependency-audit"] == "success" and $c["container-scan"] == "success") then "green"
+                    else "unknown" end'); then
+              last="$state"
+            fi
+          fi
+          echo "previous scheduled run: ${prev:-none} -> $last"
+
+          if [ "$last" = said ]; then
+            echo "Already said on the previous scheduled run; staying quiet until a morning comes back green."
+            exit 0
+          fi
+
+          text="🔴 Google Workspace MCP: this morning's security check found a problem on main: $failed failed. Run: $RUN_URL
+          Fix: bump the lock on a branch, PR, CI green, review, merge, then redeploy the five services from a machine with the gcloud login (self-hosted-mcps/deploy/deploy-personal.sh). Runbook: self-hosted-mcps NOW.md, \"Daily security check\". Said once; quiet until a morning comes back green."
+          case "$last" in
+            unknown) text="$text (Couldn't read the previous run, so this may repeat an earlier message.)" ;;
+            unsaid) text="$text (The previous morning's post failed; this is its retry.)" ;;
+          esac
+
+          if [ "$EVENT" != schedule ]; then
+            echo "Manual run, so nothing is posted. The scheduled run would post:"
+            printf '%s\n' "$text"
+            exit 0
+          fi
+          if [ -z "$WEBHOOK" ]; then
+            echo "::error::SLACK_WEBHOOK_URL is not set, so this problem reached no one"
+            exit 1
+          fi
+          payload=$(jq -n --arg text "$text" '{text: $text}')
+          curl -sS --fail-with-body --retry 3 -X POST -H 'Content-Type: application/json' --data "$payload" "$WEBHOOK"
