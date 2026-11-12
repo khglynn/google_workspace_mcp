@@ -161,13 +161,12 @@ filterwarnings = [
 core = ["tool_tiers.yaml"]
 
 [tool.uv]
-# Security floors for transitively-pulled deps (not direct dependencies).
-# These are constraints only: they force a patched version *if* the package is
-# pulled in (mcp via fastmcp, pyasn1 via google-auth/pyasn1-modules,
-# oauthlib via google-auth-oauthlib/requests-oauthlib) without
-# adding it as a direct dependency. Remove once upstream floors cover the CVEs.
+# Security floors for transitive deps
 constraint-dependencies = [
-    "mcp>=2.2.0",     # GHSA: client OAuth AS confusion, output-schema $ref fetch (core/cli.py)
-    "pyasn1>=0.6.4",  # GHSA: REAL-decode resource consumption, quadratic OID DoS
-    "oauthlib>=4.0.0", # GHSA-hj66-6f7g-4r5v: revocation endpoint JSONP injection
+    "mcp>=2.2.0",
+    "pyasn1>=0.6.4",
+    "oauthlib>=4.0.0",
+    "opentelemetry-api>=1.45.1",
+    "authlib>=1.9.1",
+    "dnspython>=2.9.0; python_version >= '3.11'",
 ]

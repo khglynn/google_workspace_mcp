@@ -1,0 +1,24 @@
+# Fleet ops (khglynn): OSV-Scanner config for the blocking `dependency-audit`
+# job in .github/workflows/fleet-ci.yml. osv-scanner reads this file because it
+# sits beside uv.lock. Each entry needs a written reason and an expiry date, and
+# only a finding that cannot be reached belongs here.
+
+[[IgnoredVulns]]
+# dnspython 2.8.0: DoS from excessive DNS compression-pointer traversal (fixed in 2.9.0).
+id = "GHSA-45c3-73f7-pv4m"
+ignoreUntil = 2027-02-12
+reason = """
+Added 2026-11-12. uv.lock carries two dnspython versions: 2.9.0 for Python 3.11+
+(forced by the "dnspython>=2.9.0; python_version >= '3.11'" constraint in
+pyproject.toml, copied from upstream) and 2.8.0 for the Python 3.10 branch only,
+because dnspython 2.9.0 requires Python 3.11 and the project still declares
+requires-python >= 3.10. The 2.8.0 copy is never installed or reached:
+(1) every deployment runs Python 3.11 (Dockerfile FROM python:3.11-slim,
+.python-version 3.11, CI tests on 3.11), and the container-scan job's Trivy pass
+checks the real image, so a regression to 2.8.0 on 3.11 would still fail CI;
+(2) dnspython's only consumer is email-validator, called through pydantic's
+validate_email with check_deliverability=False, so no DNS response is ever parsed.
+When this expires: if upstream has raised requires-python to 3.11 (Python 3.10
+reached end of life in October 2026), delete this entry and re-lock; otherwise
+re-check both points above and extend the date.
+"""
